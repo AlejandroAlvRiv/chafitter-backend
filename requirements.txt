@@ -1,7 +1,8 @@
 fastapi
 uvicorn
 gunicorn
-rembg
+rembg[cpu]
+onnxruntime
 pillow
 requests
 pydantic
