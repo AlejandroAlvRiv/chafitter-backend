@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+gunicorn
+rembg
+pillow
+requests
+pydantic
