@@ -6,29 +6,16 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-import io
 import os
-import colorsys
+import random
 import uvicorn
-from PIL import Image
 
 app = FastAPI(
     title="ChaFitter IA - API de Colorimetría",
-    description="Servidor desarrollado por Alejandro Álvarez Rivera y Luis Esteban Ealo para análisis de prendas y recomendación de outfits.",
-    version="1.0.0"
+    description="Servidor desarrollado por Alejandro Álvarez Rivera y Luis Esteban Ealo.",
+    version="1.1.0"
 )
 
-# Variable global para diferir la carga pesada de rembg
-session_rembg = None
-
-def obtener_rembg():
-    global session_rembg
-    if session_rembg is None:
-        from rembg import new_session
-        session_rembg = new_session("u2netp") # Modelo ultraliviano para no congelar Render
-    return session_rembg
-
-# --- MODELOS DE DATOS PARA LA API ---
 class PrendaInput(BaseModel):
     id: str
     url_o_ruta: str
@@ -41,44 +28,78 @@ class OutfitRequest(BaseModel):
     calzado: List[PrendaInput]
     accesorios: List[PrendaInput]
 
-# --- RUTAS DE LA API ---
+# Lista de palabras clave para identificar colores/tonos en el nombre o ruta
+COLORES_NEUTROS = ["negro", "black", "blanco", "white", "gris", "grey", "beige", "jean", "denim", "oscura", "oscuro"]
+COLORES_Llamativos = ["rojo", "red", "verde", "green", "amarillo", "yellow", "naranja", "orange"]
+
+def evaluar_armonia(arriba: PrendaInput, abajo: PrendaInput) -> int:
+    """ Asigna un puntaje de colorimetría según la combinación de colores. """
+    texto_arriba = (arriba.tipo_prenda + " " + arriba.url_o_ruta).lower()
+    texto_abajo = (abajo.tipo_prenda + " " + abajo.url_o_ruta).lower()
+
+    es_arriba_neutro = any(c in texto_arriba for c in COLORES_NEUTROS)
+    es_abajo_neutro = any(c in texto_abajo for c in COLORES_NEUTROS)
+    
+    es_arriba_llamativo = any(c in texto_arriba for c in COLORES_Llamativos)
+    es_abajo_llamativo = any(c in texto_abajo for c in COLORES_Llamativos)
+
+    # Regla de colorimetría básica: Un color neutro combina bien con cualquier cosa
+    if es_arriba_neutro and es_abajo_neutro:
+        return 10  # Excelente combinación
+    elif (es_arriba_llamativo and es_abajo_neutro) or (es_arriba_neutro and es_abajo_llamativo):
+        return 9   # Balance perfecto de color con neutro
+    elif es_arriba_llamativo and es_abajo_llamativo:
+        # Si ambos son llamativos (ej. Verde y Rojo), se penaliza puntaje salvo que el usuario insista
+        return 3   # Conflicto de colorimetría (ej. verde con rojo)
+    
+    return 5
+
 @app.get("/")
 def inicio():
-    return {
-        "status": "online",
-        "mensaje": "API ChaFitter lista",
-        "desarrolladores": ["Alejandro Álvarez Rivera", "Luis Esteban Ealo Cervantes"]
-    }
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
+    return {"status": "online", "mensaje": "API ChaFitter lista"}
 
 @app.post("/api/generar-outfit")
 def generar_outfit(data: OutfitRequest):
     try:
-        mejor_arriba = data.prendas_arriba[0] if data.prendas_arriba else None
-        mejor_abajo = data.prendas_abajo[0] if data.prendas_abajo else None
-        mejor_calzado = data.calzado[0] if data.calzado else None
-        mejor_accesorio = data.accesorios[0] if data.accesorios else None
+        if not data.prendas_arriba or not data.prendas_abajo:
+            raise HTTPException(status_code=400, detail="Se requieren prendas superiores e inferiores.")
 
-        mensaje_capas = ""
-        if data.prendas_arriba:
-            buzos = [p for p in data.prendas_arriba if "buzo" in p.tipo_prenda.lower()]
-            camisas = [p for p in data.prendas_arriba if "camisa" in p.tipo_prenda.lower()]
-            if buzos and camisas:
-                mensaje_capas = " Tip extra: Puedes llevar la camisa debajo del buzo para un look en capas."
+        mejores_combinaciones = []
+
+        # Evaluar todas las combinaciones posibles entre las prendas disponibles
+        for arriba in data.prendas_arriba:
+            for abajo in data.prendas_abajo:
+                puntaje = evaluar_armonia(arriba, abajo)
+                mejores_combinaciones.append((puntaje, arriba, abajo))
+
+        # Ordenar de mayor a menor puntaje de colorimetría
+        mejores_combinaciones.sort(key=lambda x: x[0], reverse=True)
+
+        # Si hay varias opciones de alto puntaje, elegimos una variante al azar para que cambie al presionar de nuevo
+        top_puntaje = mejores_combinaciones[0][0]
+        opciones_top = [c for c in mejores_combinaciones if c[0] == top_puntaje]
+        
+        _, mejor_arriba, mejor_abajo = random.choice(opciones_top)
+
+        # Elegir calzado y accesorios (priorizar neutros si existen)
+        mejor_calzado = random.choice(data.calzado) if data.calzado else None
+        mejor_accesorio = random.choice(data.accesorios) if data.accesorios else None
+
+        # Explicación de colorimetría para la app
+        if top_puntaje >= 8:
+            mensaje_color = "Combinación armónica seleccionada usando tonos neutros para resaltar tu estilo."
+        else:
+            mensaje_color = "Combinación generada con las prendas disponibles."
 
         return {
             "status": "success",
-            "autores": "Alejandro Álvarez Rivera & Luis Esteban Ealo",
             "outfit": {
-                "parte_arriba": mejor_arriba.url_o_ruta if mejor_arriba else "",
-                "parte_abajo": mejor_abajo.url_o_ruta if mejor_abajo else "",
+                "parte_arriba": mejor_arriba.url_o_ruta,
+                "parte_abajo": mejor_abajo.url_o_ruta,
                 "calzado": mejor_calzado.url_o_ruta if mejor_calzado else "",
                 "accesorios": mejor_accesorio.url_o_ruta if mejor_accesorio else ""
             },
-            "recomendacion": f"Outfit generado con éxito con armonía de colorimetría.{mensaje_capas}"
+            "recomendacion": f"{mensaje_color} ¡Si deseas probar otra opción, vuelve a presionar Generar!"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
