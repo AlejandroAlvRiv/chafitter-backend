@@ -124,3 +124,10 @@ def generar_outfit(data: OutfitRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+import os
+import uvicorn
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
