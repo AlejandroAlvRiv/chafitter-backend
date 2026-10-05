@@ -3,42 +3,34 @@
 # Desarrollado por: Alejandro Álvarez Rivera y Luis Esteban Ealo
 # ==============================================================================
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional, Any
+from fastapi import FastAPI, Request, HTTPException
 import os
 import re
 import random
+import json
 import uvicorn
 
 app = FastAPI(
-    title="ChaFitter IA - API de Colorimetría Total",
+    title="ChaFitter IA - API Colorimetría Robusta",
     description="Servidor desarrollado por Alejandro Álvarez Rivera y Luis Esteban Ealo.",
-    version="3.0.0"
+    version="3.5.0"
 )
-
-class RawOutfitRequest(BaseModel):
-    prendas_arriba: Any
-    prendas_abajo: Any
-    calzado: Optional[Any] = ""
-    accesorios: Optional[Any] = ""
 
 COLORES_NEUTROS = ["negro", "black", "blanco", "white", "gris", "grey", "beige", "jean", "denim", "oscura", "oscuro"]
 COLORES_LLAMATIVOS = ["rojo", "red", "verde", "green", "amarillo", "yellow", "naranja", "orange"]
 
-def parsear_lista_app_inventor(entrada: Any) -> List[str]:
-    """ Extrae absolutamente todas las rutas de imágenes enviadas por App Inventor. """
-    if not entrada:
+def extraer_rutas_de_texto(texto: str) -> list:
+    """ Extrae absolutamente todas las rutas de imágenes, sin importar el formato. """
+    if not texto:
         return []
-    texto = str(entrada)
-    # Eliminar paréntesis y comillas sobrantes de App Inventor
-    texto_limpio = texto.replace("(", " ").replace(")", " ").replace('"', ' ').replace("'", ' ')
-    # Separar por espacios o comas
-    elementos = [item.strip() for item in re.split(r'[\s,]+', texto_limpio) if item.strip()]
+    # Eliminar corchetes, paréntesis y comillas sobrantes
+    limpio = str(texto).replace("(", " ").replace(")", " ").replace("[", " ").replace("]", " ").replace('"', ' ').replace("'", ' ')
+    # Extraer palabras/rutas individuales
+    elementos = [item.strip() for item in re.split(r'[\s,]+', limpio) if item.strip()]
     return elementos
 
 def evaluar_armonia(ruta_arriba: str, ruta_abajo: str) -> int:
-    """ Compara dos prendas y asigna puntaje según colorimetría. """
+    """ Asigna un puntaje de colorimetría comparando ambas rutas. """
     txt_arriba = ruta_arriba.lower()
     txt_abajo = ruta_abajo.lower()
 
@@ -48,13 +40,13 @@ def evaluar_armonia(ruta_arriba: str, ruta_abajo: str) -> int:
     es_arriba_llamativo = any(c in txt_arriba for c in COLORES_LLAMATIVOS)
     es_abajo_llamativo = any(c in txt_abajo for c in COLORES_LLAMATIVOS)
 
-    # Verde + Negro (Llamativo + Neutro) = 10 (Máximo puntaje)
+    # Verde + Negro (Llamativo + Neutro) = Máxima Armonía (10)
     if (es_arriba_llamativo and es_abajo_neutro) or (es_arriba_neutro and es_abajo_llamativo):
         return 10
     # Neutro + Neutro = 8
     elif es_arriba_neutro and es_abajo_neutro:
         return 8
-    # Verde + Rojo (Llamativo + Llamativo) = 2 (Castigo por conflicto de color)
+    # Verde + Rojo (Llamativo + Llamativo) = 2 (Castigo por choque de color)
     elif es_arriba_llamativo and es_abajo_llamativo:
         return 2
     
@@ -65,41 +57,64 @@ def inicio():
     return {"status": "online", "mensaje": "API ChaFitter lista"}
 
 @app.post("/api/generar-outfit")
-def generar_outfit(data: RawOutfitRequest):
+async def generar_outfit(request: Request):
     try:
-        lista_arriba = parsear_lista_app_inventor(data.prendas_arriba)
-        lista_abajo = parsear_lista_app_inventor(data.prendas_abajo)
-        lista_calzado = parsear_lista_app_inventor(data.calzado)
-        lista_accesorios = parsear_lista_app_inventor(data.accesorios)
+        # Leer el cuerpo del mensaje directamente sin importar si el JSON viene imperfecto
+        body_bytes = await request.body()
+        body_str = body_bytes.decode("utf-8", errors="ignore")
 
-        if not lista_arriba or not lista_abajo:
-            raise HTTPException(status_code=400, detail="Se requiere al menos una prenda superior e inferior.")
+        # Intentar parsear JSON o buscar por bloques
+        arriba_raw = ""
+        abajo_raw = ""
+        calzado_raw = ""
+        accesorios_raw = ""
 
-        todas_las_combinaciones = []
+        try:
+            data = json.loads(body_str)
+            arriba_raw = str(data.get("prendas_arriba", ""))
+            abajo_raw = str(data.get("prendas_abajo", ""))
+            calzado_raw = str(data.get("calzado", ""))
+            accesorios_raw = str(data.get("accesorios", ""))
+        except Exception:
+            # Si el JSON viene mal formateado desde App Inventor, parsear con Regex los campos
+            arriba_match = re.search(r'"prendas_arriba"\s*:\s*"([^"]*)"', body_str)
+            abajo_match = re.search(r'"prendas_abajo"\s*:\s*"([^"]*)"', body_str)
+            calzado_match = re.search(r'"calzado"\s*:\s*"([^"]*)"', body_str)
+            accesorios_match = re.search(r'"accesorios"\s*:\s*"([^"]*)"', body_str)
 
-        # Evalúa TODAS las prendas superiores contra TODAS las inferiores
-        for arriba in lista_arriba:
-            for abajo in lista_abajo:
+            if arriba_match: arriba_raw = arriba_match.group(1)
+            if abajo_match: abajo_raw = abajo_match.group(1)
+            if calzado_match: calzado_raw = calzado_match.group(1)
+            if accesorios_match: accesorios_raw = accesorios_match.group(1)
+
+        rutas_arriba = extraer_rutas_de_texto(arriba_raw if arriba_raw else body_str)
+        rutas_abajo = extraer_rutas_de_texto(abajo_raw)
+        rutas_calzado = extraer_rutas_de_texto(calzado_raw)
+        rutas_accesorios = extraer_rutas_de_texto(accesorios_raw)
+
+        if not rutas_arriba or not rutas_abajo:
+            # Si no pudo separar por claves, extrae todas las rutas del texto bruto
+            todas = extraer_rutas_de_texto(body_str)
+            if len(todas) >= 2:
+                rutas_arriba = [todas[0]]
+                rutas_abajo = todas[1:]
+
+        evaluaciones = []
+        for arriba in rutas_arriba:
+            for abajo in rutas_abajo:
                 puntaje = evaluar_armonia(arriba, abajo)
-                todas_las_combinaciones.append((puntaje, arriba, abajo))
+                evaluaciones.append((puntaje, arriba, abajo))
 
-        # Ordenar de mayor puntaje a menor puntaje
-        todas_las_combinaciones.sort(key=lambda x: x[0], reverse=True)
+        if not evaluaciones:
+            raise HTTPException(status_code=400, detail="No se pudieron extraer prendas válidas.")
 
-        # Agrupar solo las combinaciones que obtuvieron el puntaje más alto
-        max_puntaje = todas_las_combinaciones[0][0]
-        mejores_combinaciones = [c for c in todas_las_combinaciones if c[0] == max_puntaje]
+        evaluaciones.sort(key=lambda x: x[0], reverse=True)
+        max_puntaje = evaluaciones[0][0]
+        mejores = [e for e in evaluaciones if e[0] == max_puntaje]
 
-        # Elegir una de las MEJORES combinaciones
-        _, mejor_arriba, mejor_abajo = random.choice(mejores_combinaciones)
-
-        mejor_calzado = random.choice(lista_calzado) if lista_calzado else ""
-        mejor_accesorio = random.choice(lista_accesorios) if lista_accesorios else ""
-
-        if max_puntaje >= 9:
-            mensaje = "Combinación ideal seleccionada: equilibra tonos llamativos con neutros."
-        else:
-            mensaje = "Combinación generada con las prendas disponibles."
+        _, mejor_arriba, mejor_abajo = random.choice(mejores)
+        mejor_calzado = random.choice(rutas_calzado) if rutas_calzado else ""
+        mejor_accesorio = random.choice(rutas_accesorios) if rutas_accesorios else ""
 
         return {
             "status": "success",
@@ -109,7 +124,7 @@ def generar_outfit(data: RawOutfitRequest):
                 "calzado": mejor_calzado,
                 "accesorios": mejor_accesorio
             },
-            "recomendacion": f"{mensaje} ¡Vuelve a presionar si deseas otra variante!"
+            "recomendacion": "Combinación seleccionada aplicando colorimetría en tu armario completo."
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
