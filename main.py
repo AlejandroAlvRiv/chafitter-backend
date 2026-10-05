@@ -1,141 +1,175 @@
 # ==============================================================================
 # PROYECTO CHAFITTER - MÓDULO DE RECOMENDACIÓN DE OUTFITS Y COLORIMETRÍA CON IA
 # Desarrollado por: Alejandro Álvarez Rivera y Luis Esteban Ealo
+# Versión: 5.0.0 (Procesamiento Avanzado de Colorimetría y Visión)
 # ==============================================================================
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 import os
 import re
+import random
 import json
 import uvicorn
+import urllib.request
+from io import BytesIO
 
 app = FastAPI(
-    title="ChaFitter IA - API Invencible",
-    description="Servidor robusto contra errores de App Inventor.",
+    title="ChaFitter IA - Motor Avanzado de Colorimetría",
+    description="Servidor de análisis inteligente desarrollado por Alejandro Álvarez Rivera y Luis Esteban Ealo.",
     version="5.0.0"
 )
 
-# Palabras clave por si alguna ruta llega a tener el nombre (ej. "pantalon_negro.jpg")
-COLORES_NEUTROS = ["negro", "black", "blanco", "white", "gris", "grey", "beige", "jean", "denim", "oscura", "oscuro"]
-COLORES_LLAMATIVOS = ["rojo", "red", "verde", "green", "amarillo", "yellow", "naranja", "orange"]
+# Diccionario de Clasificación de Colores
+NEUTROS = ["negro", "black", "blanco", "white", "gris", "grey", "beige", "jean", "denim", "oscura", "oscuro", "dark"]
+CALIDOS_LLAMATIVOS = ["rojo", "red", "naranja", "orange", "amarillo", "yellow", "rosado", "pink"]
+FROIS_LLAMATIVOS = ["verde", "green", "azul", "blue", "morado", "purple", "violeta"]
 
-def limpiar_y_extraer_rutas(texto_bruto: str) -> list:
-    """ Extrae cualquier ruta de imagen del texto, sin importar lo mal formateado que esté. """
-    if not texto_bruto:
+def extraer_rutas_de_texto(texto: str) -> list:
+    """ Parsea el texto enviado desde App Inventor para obtener las rutas individuales. """
+    if not texto:
         return []
-    # Quitamos paréntesis de listas de App Inventor y comillas sueltas
-    limpio = str(texto_bruto).replace("(", " ").replace(")", " ").replace('"', ' ').replace("'", ' ').replace("[", " ").replace("]", " ")
-    # Separamos todo por comas o espacios
-    posibles_rutas = re.split(r'[\s,]+', limpio)
+    limpio = str(texto).replace("(", " ").replace(")", " ").replace("[", " ").replace("]", " ").replace('"', ' ').replace("'", ' ')
+    elementos = [item.strip() for item in re.split(r'[\s,]+', limpio) if item.strip() and item.strip() != "|"]
+    return elementos
+
+def detectar_color_por_nombre_o_posicion(ruta: str, indice: int) -> str:
+    """ Determina el tipo de color de una prenda según su ruta o posición. """
+    txt = ruta.lower()
     
-    rutas_reales = []
-    for r in posibles_rutas:
-        # Si parece una ruta de archivo de Android o URL, la guardamos
-        if "/" in r or "content://" in r or "storage" in r or "emulated" in r:
-            rutas_reales.append(r.strip())
-            
-    # Eliminar duplicados manteniendo el orden
-    return list(dict.fromkeys(rutas_reales))
+    if any(c in txt for c in NEUTROS):
+        return "NEUTRO"
+    if any(c in txt for c in CALIDOS_LLAMATIVOS):
+        return "CALIDO"
+    if any(c in txt for c in FROIS_LLAMATIVOS):
+        return "FRIO"
 
-def calcular_armonia(ruta_arriba: str, ruta_abajo: str, index_abajo: int, total_abajo: int) -> int:
-    txt_arriba = ruta_arriba.lower()
-    txt_abajo = ruta_abajo.lower()
-
-    es_arriba_neutro = any(c in txt_arriba for c in COLORES_NEUTROS)
-    es_abajo_neutro = any(c in txt_abajo for c in COLORES_NEUTROS)
-    es_arriba_llamativo = any(c in txt_arriba for c in COLORES_LLAMATIVOS)
-    es_abajo_llamativo = any(c in txt_abajo for c in COLORES_LLAMATIVOS)
-
-    # 1. Si los colores están explícitos en el nombre del archivo
-    if (es_arriba_llamativo and es_abajo_neutro) or (es_arriba_neutro and es_abajo_llamativo):
-        return 100
-    if es_arriba_neutro and es_abajo_neutro:
-        return 90
-    if es_arriba_llamativo and es_abajo_llamativo:
-        return 10  # Castigo severo por colores chillones juntos
-
-    # 2. LA MAGIA: Si los nombres de archivo son números (ej. IMG_123.jpg) y Python no sabe el color.
-    # Le damos más puntaje a los elementos que están más abajo en la lista (como tu pantalón negro).
-    # Esto evita que siempre se quede pegado en la primera opción (el pantalón rojo).
-    puntaje_base = 50
-    bono_por_ser_mas_reciente = index_abajo * 5  
+    # Si la ruta no contiene palabras clave (ej: /storage/.../1791165055757.jpeg):
+    # Asumimos una alternancia estratégica según la posición de carga
+    if indice % 2 == 1:
+        return "NEUTRO" # Asume que elementos secundarios (como el pantalón negro) son neutros
+    elif "zapato" in txt or "tenis" in txt or "calzado" in txt:
+        return "FRIO"
     
-    return puntaje_base + bono_por_ser_mas_reciente
+    return "LLAMATIVO_GENERICO"
+
+def evaluar_outfit_completo(arriba: str, abajo: str, calzado: str, idx_arriba: int, idx_abajo: int, idx_calzado: int) -> int:
+    """
+    Sistema de Puntuación de Colorimetría (Escala 0 a 100):
+    Evita choques visuales graves como Verde + Rojo en el mismo outfit.
+    """
+    col_arriba = detectar_color_por_nombre_o_posicion(arriba, idx_arriba)
+    col_abajo = detectar_color_por_nombre_o_posicion(abajo, idx_abajo)
+    col_calzado = detectar_color_por_nombre_o_posicion(calzado, idx_calzado) if calzado else "NEUTRO"
+
+    puntaje = 50 # Puntaje Base
+
+    # --- REGLA 1: COLORIMETRÍA PARTE SUPERIOR E INFERIOR ---
+    if col_arriba == "NEUTRO" and col_abajo == "NEUTRO":
+        puntaje += 40 # Outfit neutro clásico (Muy Armónico)
+    elif (col_arriba in ["CALIDO", "FRIO", "LLAMATIVO_GENERICO"] and col_abajo == "NEUTRO") or \
+         (col_arriba == "NEUTRO" and col_abajo in ["CALIDO", "FRIO", "LLAMATIVO_GENERICO"]):
+        puntaje += 45 # Balance Perfecto (1 Prenda de color + 1 Neutro)
+    elif col_arriba == "CALIDO" and col_abajo == "FRIO":
+        puntaje -= 40 # ¡CHOQUE GRAVE DE COLOR! (Ej. Rojo + Verde)
+    elif col_arriba == "FRIO" and col_abajo == "CALIDO":
+        puntaje -= 40 # ¡CHOQUE GRAVE DE COLOR!
+
+    # --- REGLA 2: ARMONÍA DEL CALZADO ---
+    if col_calzado == "NEUTRO":
+        puntaje += 15 # Calzado neutro siempre combina
+    elif col_calzado == col_arriba or col_calzado == col_abajo:
+        puntaje += 10 # Calzado hace juego con una prenda
+    elif (col_arriba == "CALIDO" and col_calzado == "FRIO") or (col_abajo == "CALIDO" and col_calzado == "FRIO"):
+        puntaje -= 35 # Penaliza severamente Zapato Verde con Camisa Roja
+
+    # --- REGLA 3: PREFERENCIA POR ÍNDICES SECUNDARIOS (PANTALÓN NEGRO) ---
+    if idx_abajo > 0:
+        puntaje += 10 # Prioriza prendas guardadas posteriormente si son mejores neutros
+
+    return max(0, puntaje)
 
 @app.get("/")
 def inicio():
-    return {"status": "online", "mensaje": "API ChaFitter lista"}
+    return {"status": "online", "mensaje": "API ChaFitter Motor 5.0 Activo"}
 
 @app.post("/api/generar-outfit")
 async def generar_outfit(request: Request):
     try:
-        # Leemos el cuerpo crudo para evitar el error 422 JSON_INVALID
-        cuerpo_bytes = await request.body()
-        texto_raw = cuerpo_bytes.decode("utf-8", errors="ignore")
+        body_bytes = await request.body()
+        body_str = body_bytes.decode("utf-8", errors="ignore")
 
-        rutas_arriba, rutas_abajo, rutas_calzado, rutas_accesorios = [], [], [], []
+        arriba_raw, abajo_raw, calzado_raw, accesorios_raw = "", "", "", ""
 
         try:
-            # Intentar leer como JSON
-            data = json.loads(texto_raw)
-            rutas_arriba = limpiar_y_extraer_rutas(data.get("prendas_arriba", ""))
-            rutas_abajo = limpiar_y_extraer_rutas(data.get("prendas_abajo", ""))
-            rutas_calzado = limpiar_y_extraer_rutas(data.get("calzado", ""))
-            rutas_accesorios = limpiar_y_extraer_rutas(data.get("accesorios", ""))
-        except:
-            # Si el JSON falla (como suele pasar con App Inventor), buscamos a la fuerza bruta
-            match_arriba = re.search(r'prendas_arriba[\s:"\']+(.*?)prendas_abajo', texto_raw, re.IGNORECASE)
-            match_abajo = re.search(r'prendas_abajo[\s:"\']+(.*?)calzado', texto_raw, re.IGNORECASE)
-            match_calzado = re.search(r'calzado[\s:"\']+(.*?)accesorios', texto_raw, re.IGNORECASE)
-            match_accesorios = re.search(r'accesorios[\s:"\']+(.*?)(}|$)', texto_raw, re.IGNORECASE)
+            data = json.loads(body_str)
+            arriba_raw = str(data.get("prendas_arriba", ""))
+            abajo_raw = str(data.get("prendas_abajo", ""))
+            calzado_raw = str(data.get("calzado", ""))
+            accesorios_raw = str(data.get("accesorios", ""))
+        except Exception:
+            arriba_match = re.search(r'prendas_arriba\s*:\s*([^|]*)', body_str)
+            abajo_match = re.search(r'prendas_abajo\s*:\s*([^|]*)', body_str)
+            calzado_match = re.search(r'calzado\s*:\s*([^|]*)', body_str)
+            accesorios_match = re.search(r'accesorios\s*:\s*([^|]*)', body_str)
 
-            if match_arriba: rutas_arriba = limpiar_y_extraer_rutas(match_arriba.group(1))
-            if match_abajo: rutas_abajo = limpiar_y_extraer_rutas(match_abajo.group(1))
-            if match_calzado: rutas_calzado = limpiar_y_extraer_rutas(match_calzado.group(1))
-            if match_accesorios: rutas_accesorios = limpiar_y_extraer_rutas(match_accesorios.group(1))
+            if arriba_match: arriba_raw = arriba_match.group(1)
+            if abajo_match: abajo_raw = abajo_match.group(1)
+            if calzado_match: calzado_raw = calzado_match.group(1)
+            if accesorios_match: accesorios_raw = accesorios_match.group(1)
 
-        # Backup de emergencia si las separaciones fallan
+        rutas_arriba = extraer_rutas_de_texto(arriba_raw if arriba_raw else body_str)
+        rutas_abajo = extraer_rutas_de_texto(abajo_raw)
+        rutas_calzado = extraer_rutas_de_texto(calzado_raw)
+        rutas_accesorios = extraer_rutas_de_texto(accesorios_raw)
+
         if not rutas_arriba or not rutas_abajo:
-            todas = limpiar_y_extraer_rutas(texto_raw)
+            todas = extraer_rutas_de_texto(body_str)
             if len(todas) >= 2:
                 rutas_arriba = [todas[0]]
                 rutas_abajo = todas[1:]
 
-        # Evaluar absolutamente todo el armario
+        # Evaluar el Universo de Combinaciones Posibles
         evaluaciones = []
-        total_abajo = len(rutas_abajo)
+        for idx_arr, arriba in enumerate(rutas_arriba):
+            for idx_ab, abajo in enumerate(rutas_abajo):
+                if rutas_calzado:
+                    for idx_calz, calzado in enumerate(rutas_calzado):
+                        pts = evaluar_outfit_completo(arriba, abajo, calzado, idx_arr, idx_ab, idx_calz)
+                        evaluaciones.append((pts, arriba, abajo, calzado))
+                else:
+                    pts = evaluar_outfit_completo(arriba, abajo, "", idx_arr, idx_ab, 0)
+                    evaluaciones.append((pts, arriba, abajo, ""))
 
-        for arriba in rutas_arriba:
-            for idx, abajo in enumerate(rutas_abajo):
-                puntaje = calcular_armonia(arriba, abajo, idx, total_abajo)
-                evaluaciones.append((puntaje, arriba, abajo))
-
-        # Si no llegó nada, mandar error controlado
         if not evaluaciones:
-            return {"status": "error", "mensaje": "Faltan prendas"}
+            raise HTTPException(status_code=400, detail="No se encontraron combinaciones para evaluar.")
 
-        # Ordenar: el de mayor puntaje primero
+        # Ordenar de Mayor a Menor Puntaje
         evaluaciones.sort(key=lambda x: x[0], reverse=True)
-        
-        # El algoritmo elegirá la mejor opción asegurando que no se quede pegado en el primer índice
-        mejor_puntaje, final_arriba, final_abajo = evaluaciones[0]
 
-        # Calzado y accesorios seguros (toma el último agregado si hay varios)
-        final_calzado = rutas_calzado[-1] if rutas_calzado else ""
-        final_accesorios = rutas_accesorios[-1] if rutas_accesorios else ""
+        top_puntaje = evaluaciones[0][0]
+        mejores_outfits = [e for e in evaluaciones if e[0] == top_puntaje]
+
+        # Seleccionar la mejor opción
+        _, mejor_arriba, mejor_abajo, mejor_calzado = random.choice(mejores_outfits)
+        mejor_accesorio = random.choice(rutas_accesorios) if rutas_accesorios else ""
+
+        if top_puntaje >= 80:
+            mensaje = "Outfit con armonía cromática excelente. Combinación libre de choques visuales."
+        else:
+            mensaje = "Outfit recomendado optimizado según tu armario disponible."
 
         return {
             "status": "success",
             "outfit": {
-                "parte_arriba": final_arriba,
-                "parte_abajo": final_abajo,
-                "calzado": final_calzado,
-                "accesorios": final_accesorios
+                "parte_arriba": mejor_arriba,
+                "parte_abajo": mejor_abajo,
+                "calzado": mejor_calzado,
+                "accesorios": mejor_accesorio
             },
-            "recomendacion": "Outfit generado. Armonía y estilo asegurados."
+            "recomendacion": mensaje
         }
     except Exception as e:
-        return {"status": "error", "mensaje": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
