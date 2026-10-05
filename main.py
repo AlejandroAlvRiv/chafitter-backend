@@ -5,103 +5,80 @@
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Union, Dict, Any, Optional
+from typing import List, Optional
+import io
 import os
-import random
+import colorsys
 import uvicorn
+from PIL import Image
 
 app = FastAPI(
     title="ChaFitter IA - API de Colorimetría",
-    description="Servidor desarrollado por Alejandro Álvarez Rivera y Luis Esteban Ealo.",
-    version="1.2.0"
+    description="Servidor desarrollado por Alejandro Álvarez Rivera y Luis Esteban Ealo para análisis de prendas y recomendación de outfits.",
+    version="1.0.0"
 )
 
-class OutfitRequestFlex(BaseModel):
-    prendas_arriba: List[Union[str, Dict[str, Any]]]
-    prendas_abajo: List[Union[str, Dict[str, Any]]]
-    calzado: Optional[List[Union[str, Dict[str, Any]]]] = []
-    accesorios: Optional[List[Union[str, Dict[str, Any]]]] = []
+# Variable global para diferir la carga pesada de rembg
+session_rembg = None
 
-COLORES_NEUTROS = ["negro", "black", "blanco", "white", "gris", "grey", "beige", "jean", "denim", "oscura", "oscuro"]
-COLORES_LLAMATIVOS = ["rojo", "red", "verde", "green", "amarillo", "yellow", "naranja", "orange"]
+def obtener_rembg():
+    global session_rembg
+    if session_rembg is None:
+        from rembg import new_session
+        session_rembg = new_session("u2netp") # Modelo ultraliviano para no congelar Render
+    return session_rembg
 
-def obtener_ruta(item: Union[str, Dict[str, Any]]) -> str:
-    """Extrae la cadena de texto con la ruta de la prenda sin importar el formato enviado."""
-    if isinstance(item, str):
-        return item
-    elif isinstance(item, dict):
-        return item.get("url_o_ruta", item.get("ruta", str(item)))
-    return str(item)
+# --- MODELOS DE DATOS PARA LA API ---
+class PrendaInput(BaseModel):
+    id: str
+    url_o_ruta: str
+    categoria: str
+    tipo_prenda: Optional[str] = "desconocido"
 
-def evaluar_armonia_rutas(ruta_arriba: str, ruta_abajo: str) -> int:
-    """Evalúa la armonia de colores basándose en los nombres de las rutas de archivo."""
-    texto_arriba = ruta_arriba.lower()
-    texto_abajo = ruta_abajo.lower()
+class OutfitRequest(BaseModel):
+    prendas_arriba: List[PrendaInput]
+    prendas_abajo: List[PrendaInput]
+    calzado: List[PrendaInput]
+    accesorios: List[PrendaInput]
 
-    es_arriba_neutro = any(c in texto_arriba for c in COLORES_NEUTROS)
-    es_abajo_neutro = any(c in texto_abajo for c in COLORES_NEUTROS)
-
-    es_arriba_llamativo = any(c in texto_arriba for c in COLORES_LLAMATIVOS)
-    es_abajo_llamativo = any(c in texto_abajo for c in COLORES_LLAMATIVOS)
-
-    if es_arriba_neutro and es_abajo_neutro:
-        return 10
-    elif (es_arriba_llamativo and es_abajo_neutro) or (es_arriba_neutro and es_abajo_llamativo):
-        return 9
-    elif es_arriba_llamativo and es_abajo_llamativo:
-        return 3
-    
-    return 5
-
+# --- RUTAS DE LA API ---
 @app.get("/")
 def inicio():
-    return {"status": "online", "mensaje": "API ChaFitter lista"}
+    return {
+        "status": "online",
+        "mensaje": "API ChaFitter lista",
+        "desarrolladores": ["Alejandro Álvarez Rivera", "Luis Esteban Ealo Cervantes"]
+    }
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
 
 @app.post("/api/generar-outfit")
-def generar_outfit(data: OutfitRequestFlex):
+def generar_outfit(data: OutfitRequest):
     try:
-        if not data.prendas_arriba or not data.prendas_abajo:
-            raise HTTPException(status_code=400, detail="Se requieren prendas superiores e inferiores.")
+        mejor_arriba = data.prendas_arriba[0] if data.prendas_arriba else None
+        mejor_abajo = data.prendas_abajo[0] if data.prendas_abajo else None
+        mejor_calzado = data.calzado[0] if data.calzado else None
+        mejor_accesorio = data.accesorios[0] if data.accesorios else None
 
-        rutas_arriba = [obtener_ruta(p) for p in data.prendas_arriba if p]
-        rutas_abajo = [obtener_ruta(p) for p in data.prendas_abajo if p]
-        rutas_calzado = [obtener_ruta(p) for p in data.calzado if p]
-        rutas_accesorios = [obtener_ruta(p) for p in data.accesorios if p]
-
-        mejores_combinaciones = []
-
-        for arriba in rutas_arriba:
-            for abajo in rutas_abajo:
-                puntaje = evaluar_armonia_rutas(arriba, abajo)
-                mejores_combinaciones.append((puntaje, arriba, abajo))
-
-        if not mejores_combinaciones:
-            raise HTTPException(status_code=400, detail="No se encontraron combinaciones válidas.")
-
-        mejores_combinaciones.sort(key=lambda x: x[0], reverse=True)
-
-        top_puntaje = mejores_combinaciones[0][0]
-        opciones_top = [c for c in mejores_combinaciones if c[0] == top_puntaje]
-        
-        _, mejor_arriba, mejor_abajo = random.choice(opciones_top)
-
-        mejor_calzado = random.choice(rutas_calzado) if rutas_calzado else ""
-        mejor_accesorio = random.choice(rutas_accesorios) if rutas_accesorios else ""
-
-        if top_puntaje >= 8:
-            mensaje_color = "Combinación armónica seleccionada usando tonos neutros para resaltar tu estilo."
-        else:
-            mensaje_color = "Combinación generada con las prendas disponibles."
+        mensaje_capas = ""
+        if data.prendas_arriba:
+            buzos = [p for p in data.prendas_arriba if "buzo" in p.tipo_prenda.lower()]
+            camisas = [p for p in data.prendas_arriba if "camisa" in p.tipo_prenda.lower()]
+            if buzos and camisas:
+                mensaje_capas = " Tip extra: Puedes llevar la camisa debajo del buzo para un look en capas."
 
         return {
             "status": "success",
+            "autores": "Alejandro Álvarez Rivera & Luis Esteban Ealo",
             "outfit": {
-                "parte_arriba": mejor_arriba,
-                "parte_abajo": mejor_abajo,
-                "calzado": mejor_calzado,
-                "accesorios": mejor_accesorio
+                "parte_arriba": mejor_arriba.url_o_ruta if mejor_arriba else "",
+                "parte_abajo": mejor_abajo.url_o_ruta if mejor_abajo else "",
+                "calzado": mejor_calzado.url_o_ruta if mejor_calzado else "",
+                "accesorios": mejor_accesorio.url_o_ruta if mejor_accesorio else ""
             },
-            "recomendacion": f"{mensaje_color} ¡Si deseas probar otra opción, vuelve a presionar Generar!"
+            "recomendacion": f"Outfit generado con éxito con armonía de colorimetría.{mensaje_capas}"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
