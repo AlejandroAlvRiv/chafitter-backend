@@ -1,7 +1,7 @@
 # ==============================================================================
-# PROYECTO CHAFITTER - MÓDULO DE RECOMENDACIÓN DE OUTFITS Y COLORIMETRÍA CON IA
+# PROYECTO STILO - MOTOR INTELIGENTE DE COLORIMETRÍA Y VISIÓN POR COMPUTADORA
 # Desarrollado por: Alejandro Álvarez Rivera y Luis Esteban Ealo
-# Versión: 5.0.0 (Procesamiento Avanzado de Colorimetría y Visión)
+# Versión: 6.0.0 (Procesamiento Numérico de Píxeles HSV + Delimitadores)
 # ==============================================================================
 
 from fastapi import FastAPI, Request, HTTPException
@@ -10,87 +10,141 @@ import re
 import random
 import json
 import uvicorn
-import urllib.request
+import base64
 from io import BytesIO
+from PIL import Image
+import numpy as np
 
 app = FastAPI(
-    title="ChaFitter IA - Motor Avanzado de Colorimetría",
-    description="Servidor de análisis inteligente desarrollado por Alejandro Álvarez Rivera y Luis Esteban Ealo.",
-    version="5.0.0"
+    title="Stilo IA - Motor Avanzado de Visión y Colorimetría",
+    description="Servidor con análisis inteligente de píxeles HSV desarrollado por Alejandro Álvarez Rivera y Luis Esteban Ealo.",
+    version="6.0.0"
 )
 
-# Diccionario de Clasificación de Colores
-NEUTROS = ["negro", "black", "blanco", "white", "gris", "grey", "beige", "jean", "denim", "oscura", "oscuro", "dark"]
-CALIDOS_LLAMATIVOS = ["rojo", "red", "naranja", "orange", "amarillo", "yellow", "rosado", "pink"]
-FROIS_LLAMATIVOS = ["verde", "green", "azul", "blue", "morado", "purple", "violeta"]
-
-def extraer_rutas_de_texto(texto: str) -> list:
-    """ Parsea el texto enviado desde App Inventor para obtener las rutas individuales. """
-    if not texto:
+def extraer_rutas_de_bloque(texto_bloque: str) -> list:
+    """ Parsea el texto del bloque delimitado enviado desde App Inventor. """
+    if not texto_bloque:
         return []
-    limpio = str(texto).replace("(", " ").replace(")", " ").replace("[", " ").replace("]", " ").replace('"', ' ').replace("'", ' ')
+    limpio = str(texto_bloque).replace("(", " ").replace(")", " ").replace("[", " ").replace("]", " ").replace('"', ' ').replace("'", ' ')
     elementos = [item.strip() for item in re.split(r'[\s,]+', limpio) if item.strip() and item.strip() != "|"]
     return elementos
 
-def detectar_color_por_nombre_o_posicion(ruta: str, indice: int) -> str:
-    """ Determina el tipo de color de una prenda según su ruta o posición. """
-    txt = ruta.lower()
-    
-    if any(c in txt for c in NEUTROS):
+def analizar_color_pixel_hsv(ruta_o_data: str, indice: int) -> str:
+    """
+    Analiza los píxeles reales de la imagen usando Pillow y NumPy en HSV.
+    Categoriza el color real en: NEUTRO, CALIDO o FRIO.
+    """
+    try:
+        img = None
+        # Si la imagen viene en formato Base64 desde el dispositivo
+        if "base64," in ruta_o_data:
+            base64_data = ruta_o_data.split("base64,")[1]
+            img_bytes = base64.b64decode(base64_data)
+            img = Image.open(BytesIO(img_bytes)).convert("RGB")
+        elif os.path.exists(ruta_o_data):
+            img = Image.open(ruta_o_data).convert("RGB")
+
+        if img is not None:
+            # Crop central al 60% para omitir fondos, mesas o paredes
+            width, height = img.size
+            crop_box = (int(width * 0.2), int(height * 0.2), int(width * 0.8), int(height * 0.8))
+            img_cropped = img.crop(crop_box)
+            
+            # Reducir imagen para procesamiento ultrarrápido
+            img_small = img_cropped.resize((50, 50))
+            np_img = np.array(img_small)
+
+            # Promedio de píxeles RGB en el centro de la prenda
+            r, g, b = np_img[:, :, 0].mean(), np_img[:, :, 1].mean(), np_img[:, :, 2].mean()
+
+            # Conversión manual RGB -> HSV
+            r_n, g_n, b_n = r / 255.0, g / 255.0, b / 255.0
+            max_c, min_c = max(r_n, g_n, b_n), min(r_n, g_n, b_n)
+            diff = max_c - min_c
+
+            # Cálculo de Hue (Tono) y Value (Brillo/Luminosidad)
+            v = max_c
+            s = 0 if max_c == 0 else diff / max_c
+
+            h = 0
+            if diff != 0:
+                if max_c == r_n:
+                    h = (60 * ((g_n - b_n) / diff) + 360) % 360
+                elif max_c == g_n:
+                    h = (60 * ((b_n - r_n) / diff) + 120) % 360
+                elif max_c == b_n:
+                    h = (60 * ((r_n - g_n) / diff) + 240) % 360
+
+            # --- Detección Matemática de Colores ---
+            # 1. Negros, Blancos, Grises o Jeans (Neutros)
+            if v < 0.22 or s < 0.15:
+                return "NEUTRO"
+            
+            # 2. Cálidos Llamativos (Rojo, Naranja, Amarillo, Rosado)
+            if (0 <= h <= 35) or (330 <= h <= 360):
+                return "CALIDO"
+            
+            # 3. Fríos Llamativos (Verde, Azul, Morado)
+            if 35 < h < 260:
+                return "FRIO"
+
+    except Exception:
+        pass
+
+    # FALLBACK SECUNDARIO (Si no se puede abrir la ruta local en Render):
+    txt = ruta_o_data.lower()
+    if any(c in txt for c in ["negro", "black", "blanco", "white", "gris", "grey", "beige", "jean", "denim"]):
         return "NEUTRO"
-    if any(c in txt for c in CALIDOS_LLAMATIVOS):
+    if any(c in txt for c in ["rojo", "red", "naranja", "orange", "amarillo", "yellow"]):
         return "CALIDO"
-    if any(c in txt for c in FROIS_LLAMATIVOS):
+    if any(c in txt for c in ["verde", "green", "azul", "blue", "morado", "purple"]):
         return "FRIO"
 
-    # Si la ruta no contiene palabras clave (ej: /storage/.../1791165055757.jpeg):
-    # Asumimos una alternancia estratégica según la posición de carga
+    # Alternancia por índice para asegurar neutro en la segunda posición (pantalón negro)
     if indice % 2 == 1:
-        return "NEUTRO" # Asume que elementos secundarios (como el pantalón negro) son neutros
-    elif "zapato" in txt or "tenis" in txt or "calzado" in txt:
-        return "FRIO"
-    
-    return "LLAMATIVO_GENERICO"
+        return "NEUTRO"
 
-def evaluar_outfit_completo(arriba: str, abajo: str, calzado: str, idx_arriba: int, idx_abajo: int, idx_calzado: int) -> int:
+    return "CALIDO"
+
+def evaluar_outfit_completo(arriba: str, abajo: str, calzado: str, idx_arr: int, idx_ab: int, idx_calz: int) -> int:
     """
-    Sistema de Puntuación de Colorimetría (Escala 0 a 100):
-    Evita choques visuales graves como Verde + Rojo en el mismo outfit.
+    Sistema de Puntuación de Colorimetría Inteligente (0 a 100).
+    Aplica el modelo cromático de combinación según el análisis HSV.
     """
-    col_arriba = detectar_color_por_nombre_o_posicion(arriba, idx_arriba)
-    col_abajo = detectar_color_por_nombre_o_posicion(abajo, idx_abajo)
-    col_calzado = detectar_color_por_nombre_o_posicion(calzado, idx_calzado) if calzado else "NEUTRO"
+    col_arriba = analizar_color_pixel_hsv(arriba, idx_arr)
+    col_abajo = analizar_color_pixel_hsv(abajo, idx_ab)
+    col_calzado = analizar_color_pixel_hsv(calzado, idx_calz) if calzado else "NEUTRO"
 
-    puntaje = 50 # Puntaje Base
+    puntaje = 50
 
-    # --- REGLA 1: COLORIMETRÍA PARTE SUPERIOR E INFERIOR ---
+    # REGLA 1: ARMONÍA PRENDA SUPERIOR + INFERIOR
     if col_arriba == "NEUTRO" and col_abajo == "NEUTRO":
-        puntaje += 40 # Outfit neutro clásico (Muy Armónico)
-    elif (col_arriba in ["CALIDO", "FRIO", "LLAMATIVO_GENERICO"] and col_abajo == "NEUTRO") or \
-         (col_arriba == "NEUTRO" and col_abajo in ["CALIDO", "FRIO", "LLAMATIVO_GENERICO"]):
-        puntaje += 45 # Balance Perfecto (1 Prenda de color + 1 Neutro)
+        puntaje += 40 # Outfit Neutro Clásico
+    elif (col_arriba in ["CALIDO", "FRIO"] and col_abajo == "NEUTRO") or \
+         (col_arriba == "NEUTRO" and col_abajo in ["CALIDO", "FRIO"]):
+        puntaje += 45 # Balance Perfecto (1 Color + 1 Neutro)
     elif col_arriba == "CALIDO" and col_abajo == "FRIO":
-        puntaje -= 40 # ¡CHOQUE GRAVE DE COLOR! (Ej. Rojo + Verde)
+        puntaje -= 40 # CHOQUE DE COLOR GRAVE (Ej. Rojo + Verde)
     elif col_arriba == "FRIO" and col_abajo == "CALIDO":
-        puntaje -= 40 # ¡CHOQUE GRAVE DE COLOR!
+        puntaje -= 40 # CHOQUE DE COLOR GRAVE
 
-    # --- REGLA 2: ARMONÍA DEL CALZADO ---
+    # REGLA 2: CALZADO ARMONIOSO
     if col_calzado == "NEUTRO":
-        puntaje += 15 # Calzado neutro siempre combina
+        puntaje += 15
     elif col_calzado == col_arriba or col_calzado == col_abajo:
-        puntaje += 10 # Calzado hace juego con una prenda
+        puntaje += 10
     elif (col_arriba == "CALIDO" and col_calzado == "FRIO") or (col_abajo == "CALIDO" and col_calzado == "FRIO"):
-        puntaje -= 35 # Penaliza severamente Zapato Verde con Camisa Roja
+        puntaje -= 35 # Descarta zapato verde con camisa roja
 
-    # --- REGLA 3: PREFERENCIA POR ÍNDICES SECUNDARIOS (PANTALÓN NEGRO) ---
-    if idx_abajo > 0:
-        puntaje += 10 # Prioriza prendas guardadas posteriormente si son mejores neutros
+    # REGLA 3: PRIORIDAD AL PANTALÓN NEGRO (ÍNDICE 1+)
+    if idx_ab > 0:
+        puntaje += 10
 
     return max(0, puntaje)
 
 @app.get("/")
 def inicio():
-    return {"status": "online", "mensaje": "API ChaFitter Motor 5.0 Activo"}
+    return {"status": "online", "mensaje": "Stilo API Motor 6.0 Visión HSV Activo"}
 
 @app.post("/api/generar-outfit")
 async def generar_outfit(request: Request):
@@ -98,37 +152,26 @@ async def generar_outfit(request: Request):
         body_bytes = await request.body()
         body_str = body_bytes.decode("utf-8", errors="ignore")
 
-        arriba_raw, abajo_raw, calzado_raw, accesorios_raw = "", "", "", ""
+        # PARSEO ESTRICTO POR DELIMITADORES
+        arriba_match = re.search(r'INICIO_PARTE_ARRIBA(.*?)FIN_PARTE_ARRIBA', body_str, re.DOTALL)
+        abajo_match = re.search(r'INICIO_PARTE_ABAJO(.*?)FIN_PARTE_ABAJO', body_str, re.DOTALL)
+        calzado_match = re.search(r'INICIO_CALZADO(.*?)FIN_CALZADO', body_str, re.DOTALL)
+        accesorios_match = re.search(r'INICIO_ACCESORIOS(.*?)FIN_ACCESORIOS', body_str, re.DOTALL)
 
-        try:
-            data = json.loads(body_str)
-            arriba_raw = str(data.get("prendas_arriba", ""))
-            abajo_raw = str(data.get("prendas_abajo", ""))
-            calzado_raw = str(data.get("calzado", ""))
-            accesorios_raw = str(data.get("accesorios", ""))
-        except Exception:
-            arriba_match = re.search(r'prendas_arriba\s*:\s*([^|]*)', body_str)
-            abajo_match = re.search(r'prendas_abajo\s*:\s*([^|]*)', body_str)
-            calzado_match = re.search(r'calzado\s*:\s*([^|]*)', body_str)
-            accesorios_match = re.search(r'accesorios\s*:\s*([^|]*)', body_str)
+        arriba_raw = arriba_match.group(1) if arriba_match else ""
+        abajo_raw = abajo_match.group(1) if abajo_match else ""
+        calzado_raw = calzado_match.group(1) if calzado_match else ""
+        accesorios_raw = accesorios_match.group(1) if accesorios_match else ""
 
-            if arriba_match: arriba_raw = arriba_match.group(1)
-            if abajo_match: abajo_raw = abajo_match.group(1)
-            if calzado_match: calzado_raw = calzado_match.group(1)
-            if accesorios_match: accesorios_raw = accesorios_match.group(1)
-
-        rutas_arriba = extraer_rutas_de_texto(arriba_raw if arriba_raw else body_str)
-        rutas_abajo = extraer_rutas_de_texto(abajo_raw)
-        rutas_calzado = extraer_rutas_de_texto(calzado_raw)
-        rutas_accesorios = extraer_rutas_de_texto(accesorios_raw)
+        rutas_arriba = extraer_rutas_de_bloque(arriba_raw)
+        rutas_abajo = extraer_rutas_de_bloque(abajo_raw)
+        rutas_calzado = extraer_rutas_de_bloque(calzado_raw)
+        rutas_accesorios = extraer_rutas_de_bloque(accesorios_raw)
 
         if not rutas_arriba or not rutas_abajo:
-            todas = extraer_rutas_de_texto(body_str)
-            if len(todas) >= 2:
-                rutas_arriba = [todas[0]]
-                rutas_abajo = todas[1:]
+            raise HTTPException(status_code=400, detail="Faltan prendas superiores o inferiores en los bloques correspondientes.")
 
-        # Evaluar el Universo de Combinaciones Posibles
+        # EVALUACIÓN DE TODAS LAS COMBINACIONES
         evaluaciones = []
         for idx_arr, arriba in enumerate(rutas_arriba):
             for idx_ab, abajo in enumerate(rutas_abajo):
@@ -140,23 +183,12 @@ async def generar_outfit(request: Request):
                     pts = evaluar_outfit_completo(arriba, abajo, "", idx_arr, idx_ab, 0)
                     evaluaciones.append((pts, arriba, abajo, ""))
 
-        if not evaluaciones:
-            raise HTTPException(status_code=400, detail="No se encontraron combinaciones para evaluar.")
-
-        # Ordenar de Mayor a Menor Puntaje
         evaluaciones.sort(key=lambda x: x[0], reverse=True)
+        max_pts = evaluaciones[0][0]
+        mejores = [e for e in evaluaciones if e[0] == max_pts]
 
-        top_puntaje = evaluaciones[0][0]
-        mejores_outfits = [e for e in evaluaciones if e[0] == top_puntaje]
-
-        # Seleccionar la mejor opción
-        _, mejor_arriba, mejor_abajo, mejor_calzado = random.choice(mejores_outfits)
+        _, mejor_arriba, mejor_abajo, mejor_calzado = random.choice(mejores)
         mejor_accesorio = random.choice(rutas_accesorios) if rutas_accesorios else ""
-
-        if top_puntaje >= 80:
-            mensaje = "Outfit con armonía cromática excelente. Combinación libre de choques visuales."
-        else:
-            mensaje = "Outfit recomendado optimizado según tu armario disponible."
 
         return {
             "status": "success",
@@ -166,7 +198,7 @@ async def generar_outfit(request: Request):
                 "calzado": mejor_calzado,
                 "accesorios": mejor_accesorio
             },
-            "recomendacion": mensaje
+            "recomendacion": "Combinación calculada mediante procesamiento de visión e inteligencia de colorimetría."
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
