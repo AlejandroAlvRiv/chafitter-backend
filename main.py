@@ -1,44 +1,46 @@
 # ==============================================================================
 # PROYECTO CHAFITTER - MÓDULO DE RECOMENDACIÓN DE OUTFITS Y COLORIMETRÍA CON IA
-# Desarrollado por: Alejandro Álvarez Rivera y Luis Esteban Ealo Cervantes
+# Desarrollado por: Alejandro Álvarez Rivera y Luis Esteban Ealo
 # ==============================================================================
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any
 import os
+import re
 import random
 import uvicorn
 
 app = FastAPI(
-    title="ChaFitter IA - API de Colorimetría por Índices",
+    title="ChaFitter IA - API de Colorimetría Total",
     description="Servidor desarrollado por Alejandro Álvarez Rivera y Luis Esteban Ealo.",
-    version="2.1.0"
+    version="3.0.0"
 )
 
-class PrendaInput(BaseModel):
-    id: Optional[str] = "1"
-    url_o_ruta: str
-    categoria: Optional[str] = "desconocido"
-    tipo_prenda: Optional[str] = ""
-
-class OutfitRequest(BaseModel):
-    prendas_arriba: List[PrendaInput]
-    prendas_abajo: List[PrendaInput]
-    calzado: Optional[List[PrendaInput]] = []
-    accesorios: Optional[List[PrendaInput]] = []
+class RawOutfitRequest(BaseModel):
+    prendas_arriba: Any
+    prendas_abajo: Any
+    calzado: Optional[Any] = ""
+    accesorios: Optional[Any] = ""
 
 COLORES_NEUTROS = ["negro", "black", "blanco", "white", "gris", "grey", "beige", "jean", "denim", "oscura", "oscuro"]
 COLORES_LLAMATIVOS = ["rojo", "red", "verde", "green", "amarillo", "yellow", "naranja", "orange"]
 
-def evaluar_armonia(arriba: PrendaInput, abajo: PrendaInput) -> int:
-    """ Evalúa el nivel de armonía entre prendas superiores e inferiores. """
-    txt_arriba = (arriba.tipo_prenda + " " + arriba.url_o_ruta).lower()
-    txt_abajo = (abajo.tipo_prenda + " " + abajo.url_o_ruta).lower()
+def parsear_lista_app_inventor(entrada: Any) -> List[str]:
+    """ Extrae absolutamente todas las rutas de imágenes enviadas por App Inventor. """
+    if not entrada:
+        return []
+    texto = str(entrada)
+    # Eliminar paréntesis y comillas sobrantes de App Inventor
+    texto_limpio = texto.replace("(", " ").replace(")", " ").replace('"', ' ').replace("'", ' ')
+    # Separar por espacios o comas
+    elementos = [item.strip() for item in re.split(r'[\s,]+', texto_limpio) if item.strip()]
+    return elementos
 
-    # Ignorar elementos vacíos o con rutas no válidas
-    if not arriba.url_o_ruta.strip() or not abajo.url_o_ruta.strip():
-        return -1
+def evaluar_armonia(ruta_arriba: str, ruta_abajo: str) -> int:
+    """ Compara dos prendas y asigna puntaje según colorimetría. """
+    txt_arriba = ruta_arriba.lower()
+    txt_abajo = ruta_abajo.lower()
 
     es_arriba_neutro = any(c in txt_arriba for c in COLORES_NEUTROS)
     es_abajo_neutro = any(c in txt_abajo for c in COLORES_NEUTROS)
@@ -46,13 +48,13 @@ def evaluar_armonia(arriba: PrendaInput, abajo: PrendaInput) -> int:
     es_arriba_llamativo = any(c in txt_arriba for c in COLORES_LLAMATIVOS)
     es_abajo_llamativo = any(c in txt_abajo for c in COLORES_LLAMATIVOS)
 
-    # 1. Color Llamativo + Color Neutro = Máxima Armonía (Ej. Camisa Verde + Pantalón Negro)
+    # Verde + Negro (Llamativo + Neutro) = 10 (Máximo puntaje)
     if (es_arriba_llamativo and es_abajo_neutro) or (es_arriba_neutro and es_abajo_llamativo):
         return 10
-    # 2. Neutro + Neutro = Excelente
+    # Neutro + Neutro = 8
     elif es_arriba_neutro and es_abajo_neutro:
-        return 9
-    # 3. Dos Colores Llamativos = Conflicto de Colorimetría (Ej. Verde + Rojo)
+        return 8
+    # Verde + Rojo (Llamativo + Llamativo) = 2 (Castigo por conflicto de color)
     elif es_arriba_llamativo and es_abajo_llamativo:
         return 2
     
@@ -63,55 +65,51 @@ def inicio():
     return {"status": "online", "mensaje": "API ChaFitter lista"}
 
 @app.post("/api/generar-outfit")
-def generar_outfit(data: OutfitRequest):
+def generar_outfit(data: RawOutfitRequest):
     try:
-        # Filtrar prendas que tengan una ruta/URL válida
-        arriba_validas = [p for p in data.prendas_arriba if p.url_o_ruta and p.url_o_ruta.strip()]
-        abajo_validas = [p for p in data.prendas_abajo if p.url_o_ruta and p.url_o_ruta.strip()]
-        calzado_validos = [p for p in data.calzado if p.url_o_ruta and p.url_o_ruta.strip()]
-        accesorios_validos = [p for p in data.accesorios if p.url_o_ruta and p.url_o_ruta.strip()]
+        lista_arriba = parsear_lista_app_inventor(data.prendas_arriba)
+        lista_abajo = parsear_lista_app_inventor(data.prendas_abajo)
+        lista_calzado = parsear_lista_app_inventor(data.calzado)
+        lista_accesorios = parsear_lista_app_inventor(data.accesorios)
 
-        if not arriba_validas or not abajo_validas:
-            raise HTTPException(status_code=400, detail="Se requiere al menos una prenda superior e inferior válida.")
+        if not lista_arriba or not lista_abajo:
+            raise HTTPException(status_code=400, detail="Se requiere al menos una prenda superior e inferior.")
 
-        evaluaciones = []
+        todas_las_combinaciones = []
 
-        # Evaluar todas las combinaciones recibidas
-        for arriba in arriba_validas:
-            for abajo in abajo_validas:
+        # Evalúa TODAS las prendas superiores contra TODAS las inferiores
+        for arriba in lista_arriba:
+            for abajo in lista_abajo:
                 puntaje = evaluar_armonia(arriba, abajo)
-                if puntaje >= 0:
-                    evaluaciones.append((puntaje, arriba, abajo))
+                todas_las_combinaciones.append((puntaje, arriba, abajo))
 
-        if not evaluaciones:
-            raise HTTPException(status_code=400, detail="No se encontraron combinaciones válidas.")
+        # Ordenar de mayor puntaje a menor puntaje
+        todas_las_combinaciones.sort(key=lambda x: x[0], reverse=True)
 
-        # Ordenar por puntaje descendente
-        evaluaciones.sort(key=lambda x: x[0], reverse=True)
+        # Agrupar solo las combinaciones que obtuvieron el puntaje más alto
+        max_puntaje = todas_las_combinaciones[0][0]
+        mejores_combinaciones = [c for c in todas_las_combinaciones if c[0] == max_puntaje]
 
-        top_puntaje = evaluaciones[0][0]
-        mejores_opciones = [e for e in evaluaciones if e[0] == top_puntaje]
-        
-        # Seleccionar una opción top al azar para permitir variación al presionar el botón de nuevo
-        _, mejor_arriba, mejor_abajo = random.choice(mejores_opciones)
+        # Elegir una de las MEJORES combinaciones
+        _, mejor_arriba, mejor_abajo = random.choice(mejores_combinaciones)
 
-        mejor_calzado = random.choice(calzado_validos) if calzado_validos else None
-        mejor_accesorio = random.choice(accesorios_validos) if accesorios_validos else None
+        mejor_calzado = random.choice(lista_calzado) if lista_calzado else ""
+        mejor_accesorio = random.choice(lista_accesorios) if lista_accesorios else ""
 
-        if top_puntaje >= 8:
-            mensaje = "Combinación armónica seleccionada usando tonos neutros para resaltar tu estilo."
+        if max_puntaje >= 9:
+            mensaje = "Combinación ideal seleccionada: equilibra tonos llamativos con neutros."
         else:
             mensaje = "Combinación generada con las prendas disponibles."
 
         return {
             "status": "success",
             "outfit": {
-                "parte_arriba": mejor_arriba.url_o_ruta,
-                "parte_abajo": mejor_abajo.url_o_ruta,
-                "calzado": mejor_calzado.url_o_ruta if mejor_calzado else "",
-                "accesorios": mejor_accesorio.url_o_ruta if mejor_accesorio else ""
+                "parte_arriba": mejor_arriba,
+                "parte_abajo": mejor_abajo,
+                "calzado": mejor_calzado,
+                "accesorios": mejor_accesorio
             },
-            "recomendacion": f"{mensaje} ¡Si deseas probar otra opción, vuelve a presionar Generar!"
+            "recomendacion": f"{mensaje} ¡Vuelve a presionar si deseas otra variante!"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
