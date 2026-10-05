@@ -7,30 +7,33 @@ from fastapi import FastAPI, Request, HTTPException
 import os
 import re
 import random
-import json
 import uvicorn
 
 app = FastAPI(
-    title="ChaFitter IA - API Colorimetría Robusta",
+    title="ChaFitter IA - API Colorimetría Segmentada",
     description="Servidor desarrollado por Alejandro Álvarez Rivera y Luis Esteban Ealo.",
-    version="3.5.0"
+    version="4.0.0"
 )
 
 COLORES_NEUTROS = ["negro", "black", "blanco", "white", "gris", "grey", "beige", "jean", "denim", "oscura", "oscuro"]
 COLORES_LLAMATIVOS = ["rojo", "red", "verde", "green", "amarillo", "yellow", "naranja", "orange"]
 
-def extraer_rutas_de_texto(texto: str) -> list:
-    """ Extrae absolutamente todas las rutas de imágenes, sin importar el formato. """
-    if not texto:
+def extraer_rutas_seccion(texto_bruto: str, etiqueta_inicio: str, etiqueta_fin: str) -> list:
+    """ Extrae únicamente las rutas que pertenezcan al bloque delimitado. """
+    try:
+        patron = re.escape(etiqueta_inicio) + r"(.*?)" + re.escape(etiqueta_fin)
+        coincidencia = re.search(patron, texto_bruto, re.DOTALL)
+        if not coincidencia:
+            return []
+        
+        bloque = coincidencia.group(1).replace("(", " ").replace(")", " ").replace('"', ' ').replace("'", ' ')
+        rutas = [item.strip() for item in re.split(r'[\s,]+', bloque) if item.strip()]
+        return rutas
+    except Exception:
         return []
-    # Eliminar corchetes, paréntesis y comillas sobrantes
-    limpio = str(texto).replace("(", " ").replace(")", " ").replace("[", " ").replace("]", " ").replace('"', ' ').replace("'", ' ')
-    # Extraer palabras/rutas individuales
-    elementos = [item.strip() for item in re.split(r'[\s,]+', limpio) if item.strip()]
-    return elementos
 
 def evaluar_armonia(ruta_arriba: str, ruta_abajo: str) -> int:
-    """ Asigna un puntaje de colorimetría comparando ambas rutas. """
+    """ Evalúa el nivel de armonía de colores entre prendas superiores e inferiores. """
     txt_arriba = ruta_arriba.lower()
     txt_abajo = ruta_abajo.lower()
 
@@ -40,13 +43,13 @@ def evaluar_armonia(ruta_arriba: str, ruta_abajo: str) -> int:
     es_arriba_llamativo = any(c in txt_arriba for c in COLORES_LLAMATIVOS)
     es_abajo_llamativo = any(c in txt_abajo for c in COLORES_LLAMATIVOS)
 
-    # Verde + Negro (Llamativo + Neutro) = Máxima Armonía (10)
+    # Camisa Verde (Llamativo) + Pantalón Negro (Neutro) = Puntaje 10
     if (es_arriba_llamativo and es_abajo_neutro) or (es_arriba_neutro and es_abajo_llamativo):
         return 10
-    # Neutro + Neutro = 8
+    # Neutro + Neutro = Puntaje 8
     elif es_arriba_neutro and es_abajo_neutro:
         return 8
-    # Verde + Rojo (Llamativo + Llamativo) = 2 (Castigo por choque de color)
+    # Camisa Verde + Pantalón Rojo (Llamativo + Llamativo) = Puntaje 2
     elif es_arriba_llamativo and es_abajo_llamativo:
         return 2
     
@@ -59,45 +62,17 @@ def inicio():
 @app.post("/api/generar-outfit")
 async def generar_outfit(request: Request):
     try:
-        # Leer el cuerpo del mensaje directamente sin importar si el JSON viene imperfecto
         body_bytes = await request.body()
         body_str = body_bytes.decode("utf-8", errors="ignore")
 
-        # Intentar parsear JSON o buscar por bloques
-        arriba_raw = ""
-        abajo_raw = ""
-        calzado_raw = ""
-        accesorios_raw = ""
-
-        try:
-            data = json.loads(body_str)
-            arriba_raw = str(data.get("prendas_arriba", ""))
-            abajo_raw = str(data.get("prendas_abajo", ""))
-            calzado_raw = str(data.get("calzado", ""))
-            accesorios_raw = str(data.get("accesorios", ""))
-        except Exception:
-            # Si el JSON viene mal formateado desde App Inventor, parsear con Regex los campos
-            arriba_match = re.search(r'"prendas_arriba"\s*:\s*"([^"]*)"', body_str)
-            abajo_match = re.search(r'"prendas_abajo"\s*:\s*"([^"]*)"', body_str)
-            calzado_match = re.search(r'"calzado"\s*:\s*"([^"]*)"', body_str)
-            accesorios_match = re.search(r'"accesorios"\s*:\s*"([^"]*)"', body_str)
-
-            if arriba_match: arriba_raw = arriba_match.group(1)
-            if abajo_match: abajo_raw = abajo_match.group(1)
-            if calzado_match: calzado_raw = calzado_match.group(1)
-            if accesorios_match: accesorios_raw = accesorios_match.group(1)
-
-        rutas_arriba = extraer_rutas_de_texto(arriba_raw if arriba_raw else body_str)
-        rutas_abajo = extraer_rutas_de_texto(abajo_raw)
-        rutas_calzado = extraer_rutas_de_texto(calzado_raw)
-        rutas_accesorios = extraer_rutas_de_texto(accesorios_raw)
+        # Extraer estrictamente las fotos de cada categoría por sus marcas
+        rutas_arriba = extraer_rutas_seccion(body_str, "PARTE_ARRIBA:", "FIN_ARRIBA")
+        rutas_abajo = extraer_rutas_seccion(body_str, "PARTE_ABAJO:", "FIN_ABAJO")
+        rutas_calzado = extraer_rutas_seccion(body_str, "CALZADO:", "FIN_CALZADO")
+        rutas_accesorios = extraer_rutas_seccion(body_str, "ACCESORIOS:", "FIN_ACCESORIOS")
 
         if not rutas_arriba or not rutas_abajo:
-            # Si no pudo separar por claves, extrae todas las rutas del texto bruto
-            todas = extraer_rutas_de_texto(body_str)
-            if len(todas) >= 2:
-                rutas_arriba = [todas[0]]
-                rutas_abajo = todas[1:]
+            raise HTTPException(status_code=400, detail="Se requiere al menos una prenda superior e inferior.")
 
         evaluaciones = []
         for arriba in rutas_arriba:
@@ -106,8 +81,9 @@ async def generar_outfit(request: Request):
                 evaluaciones.append((puntaje, arriba, abajo))
 
         if not evaluaciones:
-            raise HTTPException(status_code=400, detail="No se pudieron extraer prendas válidas.")
+            raise HTTPException(status_code=400, detail="No se encontraron combinaciones válidas.")
 
+        # Ordenar de mayor a menor puntaje
         evaluaciones.sort(key=lambda x: x[0], reverse=True)
         max_puntaje = evaluaciones[0][0]
         mejores = [e for e in evaluaciones if e[0] == max_puntaje]
