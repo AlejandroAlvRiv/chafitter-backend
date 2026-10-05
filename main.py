@@ -1,5 +1,5 @@
 # ==============================================================================
-# PROYECTO CHAFITTER - MÓDULO DE RECOMENDACIÓN DE OUTFITS Y COLORIMETRÍA CON IA
+# PROYECTO CHAFITTER - MÓDULO DE RECOMENDACIÓN DE OUTFITS Y COLORIMETRÍA TOTAL
 # Desarrollado por: Alejandro Álvarez Rivera y Luis Esteban Ealo
 # ==============================================================================
 
@@ -10,16 +10,16 @@ import random
 import uvicorn
 
 app = FastAPI(
-    title="ChaFitter IA - API Colorimetría Segmentada",
+    title="ChaFitter IA - API Colorimetría Integral (4 Elementos)",
     description="Servidor desarrollado por Alejandro Álvarez Rivera y Luis Esteban Ealo.",
-    version="4.0.0"
+    version="5.0.0"
 )
 
 COLORES_NEUTROS = ["negro", "black", "blanco", "white", "gris", "grey", "beige", "jean", "denim", "oscura", "oscuro"]
 COLORES_LLAMATIVOS = ["rojo", "red", "verde", "green", "amarillo", "yellow", "naranja", "orange"]
 
 def extraer_rutas_seccion(texto_bruto: str, etiqueta_inicio: str, etiqueta_fin: str) -> list:
-    """ Extrae únicamente las rutas que pertenezcan al bloque delimitado. """
+    """ Extrae rigurosamente todas las rutas de imágenes pertenecientes a una categoría. """
     try:
         patron = re.escape(etiqueta_inicio) + r"(.*?)" + re.escape(etiqueta_fin)
         coincidencia = re.search(patron, texto_bruto, re.DOTALL)
@@ -32,28 +32,44 @@ def extraer_rutas_seccion(texto_bruto: str, etiqueta_inicio: str, etiqueta_fin: 
     except Exception:
         return []
 
-def evaluar_armonia(ruta_arriba: str, ruta_abajo: str) -> int:
-    """ Evalúa el nivel de armonía de colores entre prendas superiores e inferiores. """
-    txt_arriba = ruta_arriba.lower()
-    txt_abajo = ruta_abajo.lower()
+def es_neutro(ruta: str) -> bool:
+    """ Verifica si la ruta o nombre de la prenda contiene un tono neutro. """
+    txt = ruta.lower()
+    return any(c in txt for c in COLORES_NEUTROS)
 
-    es_arriba_neutro = any(c in txt_arriba for c in COLORES_NEUTROS)
-    es_abajo_neutro = any(c in txt_abajo for c in COLORES_NEUTROS)
+def es_llamativo(ruta: str) -> bool:
+    """ Verifica si la ruta o nombre de la prenda contiene un tono llamativo. """
+    txt = ruta.lower()
+    return any(c in txt for c in COLORES_LLAMATIVOS)
 
-    es_arriba_llamativo = any(c in txt_arriba for c in COLORES_LLAMATIVOS)
-    es_abajo_llamativo = any(c in txt_abajo for c in COLORES_LLAMATIVOS)
+def evaluar_armonia_completa(arriba: str, abajo: str, calzado: str, accesorio: str) -> int:
+    """ 
+    Evalúa la armonía del outfit completo considerando las 4 prendas juntos.
+    Aplica reglas de colorimetría para equilibrar prendas llamativas con neutras.
+    """
+    puntaje = 5
 
-    # Camisa Verde (Llamativo) + Pantalón Negro (Neutro) = Puntaje 10
-    if (es_arriba_llamativo and es_abajo_neutro) or (es_arriba_neutro and es_abajo_llamativo):
-        return 10
-    # Neutro + Neutro = Puntaje 8
-    elif es_arriba_neutro and es_abajo_neutro:
-        return 8
-    # Camisa Verde + Pantalón Rojo (Llamativo + Llamativo) = Puntaje 2
-    elif es_arriba_llamativo and es_abajo_llamativo:
-        return 2
-    
-    return 5
+    # 1. Armonía entre Parte Arriba y Parte Abajo
+    if (es_llamativo(arriba) and es_neutro(abajo)) or (es_neutro(arriba) and es_llamativo(abajo)):
+        puntaje += 5  # Equilibrio perfecto (Ej. Camisa Verde + Pantalón Negro)
+    elif es_neutro(arriba) and es_neutro(abajo):
+        puntaje += 4  # Outfit monocromático o neutro seguro
+    elif es_llamativo(arriba) and es_llamativo(abajo):
+        puntaje -= 3  # Choque visual entre tonos llamativos (Ej. Verde + Rojo)
+
+    # 2. Evaluación del Calzado respecto al outfit
+    if calzado:
+        if es_neutro(calzado):
+            puntaje += 2  # El calzado neutro combina con todo
+        elif es_llamativo(calzado) and (es_llamativo(arriba) or es_llamativo(abajo)):
+            puntaje -= 2  # Evitar recargar con calzado llamativo si ya hay otra prenda llamativa
+
+    # 3. Evaluación de Accesorios
+    if accesorio:
+        if es_neutro(accesorio):
+            puntaje += 1
+
+    return puntaje
 
 @app.get("/")
 def inicio():
@@ -65,7 +81,7 @@ async def generar_outfit(request: Request):
         body_bytes = await request.body()
         body_str = body_bytes.decode("utf-8", errors="ignore")
 
-        # Extraer estrictamente las fotos de cada categoría por sus marcas
+        # Extraer las imágenes guardadas para las 4 categorías
         rutas_arriba = extraer_rutas_seccion(body_str, "PARTE_ARRIBA:", "FIN_ARRIBA")
         rutas_abajo = extraer_rutas_seccion(body_str, "PARTE_ABAJO:", "FIN_ABAJO")
         rutas_calzado = extraer_rutas_seccion(body_str, "CALZADO:", "FIN_CALZADO")
@@ -74,33 +90,39 @@ async def generar_outfit(request: Request):
         if not rutas_arriba or not rutas_abajo:
             raise HTTPException(status_code=400, detail="Se requiere al menos una prenda superior e inferior.")
 
-        evaluaciones = []
+        # Asegurar valores por defecto si no existen en la lista para evitar visores vacíos
+        calzados_eval = rutas_calzado if rutas_calzado else [""]
+        accesorios_eval = rutas_accesorios if rutas_accesorios else [""]
+
+        todas_las_combinaciones = []
+
+        # Matriz de evaluación cruzando LOS 4 ELEMENTOS
         for arriba in rutas_arriba:
             for abajo in rutas_abajo:
-                puntaje = evaluar_armonia(arriba, abajo)
-                evaluaciones.append((puntaje, arriba, abajo))
+                for calzado in calzados_eval:
+                    for accesorio in accesorios_eval:
+                        puntaje = evaluar_armonia_completa(arriba, abajo, calzado, accesorio)
+                        todas_las_combinaciones.append((puntaje, arriba, abajo, calzado, accesorio))
 
-        if not evaluaciones:
-            raise HTTPException(status_code=400, detail="No se encontraron combinaciones válidas.")
+        # Ordenar de mayor a menor puntaje de armonía
+        todas_las_combinaciones.sort(key=lambda x: x[0], reverse=True)
 
-        # Ordenar de mayor a menor puntaje
-        evaluaciones.sort(key=lambda x: x[0], reverse=True)
-        max_puntaje = evaluaciones[0][0]
-        mejores = [e for e in evaluaciones if e[0] == max_puntaje]
+        # Seleccionar las mejores combinaciones posibles
+        max_puntaje = todas_las_combinaciones[0][0]
+        mejores_opciones = [c for c in todas_las_combinaciones if c[0] == max_puntaje]
 
-        _, mejor_arriba, mejor_abajo = random.choice(mejores)
-        mejor_calzado = random.choice(rutas_calzado) if rutas_calzado else ""
-        mejor_accesorio = random.choice(rutas_accesorios) if rutas_accesorios else ""
+        # Elegir una combinación top al azar para permitir variación al presionar el botón
+        _, mejor_arriba, mejor_abajo, mejor_calzado, mejor_accesorio = random.choice(mejores_opciones)
 
         return {
             "status": "success",
             "outfit": {
                 "parte_arriba": mejor_arriba,
                 "parte_abajo": mejor_abajo,
-                "calzado": mejor_calzado,
-                "accesorios": mejor_accesorio
+                "calzado": mejor_calzado if mejor_calzado else (rutas_calzado[0] if rutas_calzado else ""),
+                "accesorios": mejor_accesorio if mejor_accesorio else (rutas_accesorios[0] if rutas_accesorios else "")
             },
-            "recomendacion": "Combinación seleccionada aplicando colorimetría en tu armario completo."
+            "recomendacion": "Combinación seleccionada garantizando armonía en los 4 elementos de tu outfit."
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
