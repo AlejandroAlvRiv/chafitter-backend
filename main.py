@@ -100,6 +100,7 @@ class Prenda:
     familia: str
     estampado: bool
     nombre: str
+    fuente: str = "imagen"   # imagen | nombre | desconocido
 
     @property
     def neutro(self) -> bool:
@@ -161,9 +162,11 @@ def _nombre_color(h: float, s: float, v: float, familia: str) -> str:
     return base
 
 
-def _construir_prenda(ref: str, h: float, s: float, v: float, estampado: bool) -> Prenda:
+def _construir_prenda(ref: str, h: float, s: float, v: float, estampado: bool,
+                      fuente: str = "imagen") -> Prenda:
     fam = _clasificar(h, s, v)
-    return Prenda(ref, float(h), float(s), float(v), fam, estampado, _nombre_color(h, s, v, fam))
+    return Prenda(ref, float(h), float(s), float(v), fam, estampado,
+                  _nombre_color(h, s, v, fam), fuente)
 
 
 # =========================== ANÁLISIS DE IMAGEN ================================
@@ -313,8 +316,8 @@ def _perfil_por_nombre(ref: str) -> Prenda:
     if len(txt) < 1024:
         for claves, (h, s, v) in _PALABRAS:
             if any(c in txt for c in claves):
-                return _construir_prenda(ref, h, s, v, False)
-    return Prenda(ref, 0.0, 0.0, 0.5, "DESCONOCIDO", False, NOMBRES_FAMILIA["DESCONOCIDO"])
+                return _construir_prenda(ref, h, s, v, False, "nombre")
+    return Prenda(ref, 0.0, 0.0, 0.5, "DESCONOCIDO", False, NOMBRES_FAMILIA["DESCONOCIDO"], "desconocido")
 
 
 # ------------------------------ Caché LRU -------------------------------------
@@ -415,25 +418,28 @@ def _armonia_par(a: Prenda, b: Prenda) -> Tuple[float, Optional[str]]:
 
     # color + color
     d = _dh(a.h, b.h)
-    muted = min(a.s, b.s) < 0.45 or min(a.v, b.v) < 0.45
+    vivos = min(a.s, b.s) > 0.5 and min(a.v, b.v) > 0.4
+    suave = min(a.s, b.s) < 0.45 or min(a.v, b.v) < 0.40
     pastel = all(p.s < 0.45 and p.v > 0.7 for p in (a, b))
     if d <= 20:
-        pts, razon = (82, "tonal: mismo color en distinta intensidad") if dv >= 0.2 \
-            else (62, "mismo color de pies a cabeza")
+        if dv >= 0.2:
+            pts, razon = 82, "tonal: mismo color en distinta intensidad"
+        elif vivos:
+            pts, razon = 45, "mismo color intenso de pies a cabeza"
+        else:
+            pts, razon = 62, "mismo color de pies a cabeza"
     elif d <= 50:
         pts, razon = 72 + (6 if dv >= 0.2 else 0), "colores análogos, se ven coordinados"
-        if a.s > 0.55 and b.s > 0.55:
+        if vivos:
             pts -= 8
-    elif d <= 100:
-        pts, razon = 48 + (14 if muted else 0), "colores distintos"
-    elif d <= 150:
-        pts, razon = 40 + (10 if muted else 0), "colores contrastantes"
+    elif suave:
+        pts, razon = (58 if d <= 100 else 52), "colores distintos pero suavizados"
+    elif d > 100:
+        pts, razon = 8, "choque: colores opuestos e intensos (ej. rojo con verde)"
     else:
-        pts, razon = (52, "complementarios suavizados") if muted else (38, "complementarios muy intensos")
+        pts, razon = 15, "choque de colores intensos"
     if pastel and d > 20:
         pts, razon = pts + 12, "paleta pastel suave"
-    if a.s > 0.6 and b.s > 0.6 and d > 40:
-        pts -= 10
     return float(max(0, min(100, pts))), razon
 
 
@@ -467,22 +473,27 @@ def _armonia_calzado(c: Prenda, a: Prenda, b: Prenda) -> Tuple[float, Optional[s
     if cromaticas:
         if any(_dh(c.h, p.h) <= 30 for p in cromaticas):
             return 82.0, "calzado a juego con el color del outfit"
-        return 40.0, "calzado de color que compite con el outfit"
+        return 20.0, "choque: calzado de color que compite con el outfit"
     return (78.0, "calzado de color como detalle protagonista") if c.vivo else (70.0, None)
 
 
 def _balance(piezas: List[Prenda]) -> Tuple[float, List[str]]:
     razones = []
     pts = 80.0
-    vivas = sum(p.vivo for p in piezas)
+    vivas = 0
+    hues_vivos = []
+    for p in piezas:                      # prendas vivas del mismo color cuentan como una
+        if p.vivo and all(_dh(p.h, h) > 30 for h in hues_vivos):
+            hues_vivos.append(p.h)
+            vivas += 1
     if vivas == 1:
         pts += 8
         razones.append("una sola prenda protagonista")
     elif vivas == 2:
-        pts -= 22
+        pts -= 30
         razones.append("demasiados colores intensos")
     elif vivas >= 3:
-        pts -= 35
+        pts -= 45
 
     hues = []
     for p in piezas:
@@ -519,6 +530,8 @@ def _evaluar(a: Prenda, b: Prenda, c: Optional[Prenda], penal_hist: float) -> Tu
         p_bal, r_bal = _balance([a, b])
         total = 0.75 * p_par + 0.25 * p_bal
     razones += r_bal
+    if p_par < 25 or (c is not None and p_cal < 30):
+        total = min(total, 35.0)          # un choque grave nunca puede ganar con nota alta
     return max(0.0, total - penal_hist), razones
 
 
@@ -602,7 +615,8 @@ def _ref_corta(ref: str):
 def _ficha(p: Optional[Prenda]):
     if p is None:
         return None
-    return {"color": p.nombre, "familia": p.familia.lower(), "estampado": p.estampado}
+    return {"color": p.nombre, "familia": p.familia.lower(), "estampado": p.estampado,
+            "fuente": p.fuente}
 
 
 # ============================= LÓGICA PRINCIPAL ================================
@@ -686,7 +700,12 @@ def _generar(d: dict) -> dict:
     if motivos:
         rec += f" {motivos[0].upper() + motivos[1:]}."
     if sc < 50:
-        rec += " Es la mejor opción con las prendas disponibles; agrega prendas neutras para más combinaciones."
+        rec += (" Ojo: con las prendas disponibles todas las combinaciones tienen choques de color;"
+                ' agrega prendas neutras (negro, blanco, gris, jean, beige) para mejores resultados.')
+
+    advertencias = [f"No se pudo leer el color de una prenda de {zona} (fuente: {p.fuente}); "
+                    "envía la imagen en base64 o una URL."
+                    for zona, p in (("arriba", pa), ("abajo", pb), ("calzado", pc)) if p and p.fuente != "imagen"]
 
     return {
         "status": "success",
@@ -702,6 +721,7 @@ def _generar(d: dict) -> dict:
             "parte_arriba": _ficha(pa), "parte_abajo": _ficha(pb),
             "calzado": _ficha(pc), "accesorios": _ficha(acc_perfil),
         },
+        "advertencias": advertencias,
         "alternativas": alternativas,
         "combinaciones_evaluadas": len(cands),
         "tiempo_ms": int((time.perf_counter() - t0) * 1000),
