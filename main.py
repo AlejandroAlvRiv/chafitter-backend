@@ -42,7 +42,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 from typing import List, Optional, Tuple
 
@@ -320,24 +320,48 @@ def _perfil_por_nombre(ref: str) -> Prenda:
     return Prenda(ref, 0.0, 0.0, 0.5, "DESCONOCIDO", False, NOMBRES_FAMILIA["DESCONOCIDO"], "desconocido")
 
 
+# ------------------- Pista de color enviada por la app -------------------------
+# Formato:  ruta@@pista     donde pista = "verde" | "azul marino" | "98-38-48" (h-s-v%)
+# El servidor no puede abrir /storage/... del celular, así que la app envía el color.
+SEP_PISTA = "@@"
+_RE_HSV = re.compile(r"^(\d{1,3})-(\d{1,3})-(\d{1,3})(-e)?$")
+
+
+def _limpia(ref: str) -> str:
+    return ref.rsplit(SEP_PISTA, 1)[0] if SEP_PISTA in ref else ref
+
+
+def _prenda_desde_pista(ref: str, pista: str) -> Optional[Prenda]:
+    pista = pista.strip().lower().replace("_", " ")
+    m = _RE_HSV.match(pista)
+    if m:
+        h, sat, val = int(m.group(1)) % 360, min(int(m.group(2)), 100) / 100, min(int(m.group(3)), 100) / 100
+        return _construir_prenda(ref, h, sat, val, bool(m.group(4)), "pista")
+    p = _perfil_por_nombre(pista)
+    return replace(p, ref=ref, fuente="pista") if p.fuente == "nombre" else None
+
+
 # ------------------------------ Caché LRU -------------------------------------
 _cache: "OrderedDict[str, Prenda]" = OrderedDict()
 _cache_lock = threading.Lock()
 
 
 def obtener_prenda(ref: str) -> Prenda:
+    limpio = _limpia(ref)
+    pista = ref.rsplit(SEP_PISTA, 1)[1] if SEP_PISTA in ref else ""
     clave = hashlib.sha1(ref.encode("utf-8", "ignore")).hexdigest()
-    if len(ref) < 1024 and os.path.isfile(ref):
-        clave += str(os.path.getmtime(ref))
+    if len(limpio) < 1024 and os.path.isfile(limpio):
+        clave += str(os.path.getmtime(limpio))
     with _cache_lock:
         if clave in _cache:
             _cache.move_to_end(clave)
             return _cache[clave]
-    prenda = None
+    prenda = _prenda_desde_pista(ref, pista) if pista else None
     try:
-        img = _cargar_imagen(ref)
-        if img is not None:
-            prenda = _perfil_desde_imagen(img, ref)
+        if prenda is None:
+            img = _cargar_imagen(limpio)
+            if img is not None:
+                prenda = _perfil_desde_imagen(img, ref)
     except Exception as e:
         log.debug("Imagen no analizable: %s", e)
     if prenda is None:
@@ -635,6 +659,7 @@ def _limitar(lista: list) -> list:
 
 
 def _ref_corta(ref: str):
+    ref = _limpia(ref)
     return ref if len(ref) <= 500 else None
 
 
@@ -656,7 +681,7 @@ def _generar(d: dict) -> dict:
 
     refs = list(dict.fromkeys(arriba + abajo + calzado + accesorios))
     perfiles = dict(zip(refs, _EXEC.map(obtener_prenda, refs)))   # análisis en paralelo + caché
-    hist = set(d["historial"])
+    hist = {_limpia(x) for x in d["historial"]}
 
     # Pares arriba-abajo (barato), con poda si el armario es enorme.
     pares = []
@@ -672,10 +697,10 @@ def _generar(d: dict) -> dict:
     for _, ia, ib in pares:
         ra, rb = arriba[ia], abajo[ib]
         pa, pb = perfiles[ra], perfiles[rb]
-        base_pen = 7.0 * ((ra in hist) + (rb in hist))
+        base_pen = 7.0 * ((_limpia(ra) in hist) + (_limpia(rb) in hist))
         if calzado:
             for ic, rc in enumerate(calzado):
-                pen = base_pen + (7.0 if rc in hist else 0.0)
+                pen = base_pen + (7.0 if _limpia(rc) in hist else 0.0)
                 sc, rz = _evaluar(pa, pb, perfiles[rc], pen)
                 cands.append((sc, ia, ib, ic, rz))
         else:
@@ -696,7 +721,7 @@ def _generar(d: dict) -> dict:
     acc_ref, acc_perfil = "", None
     if accesorios:
         base = [p for p in (pa, pb, pc) if p]
-        pts = [max(0.0, _evaluar_accesorio(perfiles[r], base) - (6.0 if r in hist else 0.0))
+        pts = [max(0.0, _evaluar_accesorio(perfiles[r], base) - (6.0 if _limpia(r) in hist else 0.0))
                for r in accesorios]
         m = max(pts)
         acc_ref = random.choices(accesorios, weights=[math.exp((p - m) / 4.0) for p in pts], k=1)[0]
@@ -731,15 +756,15 @@ def _generar(d: dict) -> dict:
 
     advertencias = [f"No se pudo leer el color de una prenda de {zona} (fuente: {p.fuente}); "
                     "envía la imagen en base64 o una URL."
-                    for zona, p in (("arriba", pa), ("abajo", pb), ("calzado", pc)) if p and p.fuente != "imagen"]
+                    for zona, p in (("arriba", pa), ("abajo", pb), ("calzado", pc)) if p and p.fuente not in ("imagen", "pista")]
 
     return {
         "status": "success",
         "outfit": {
-            "parte_arriba": arriba[ia],
-            "parte_abajo": abajo[ib],
-            "calzado": calzado[ic] if ic >= 0 else "",
-            "accesorios": acc_ref,
+            "parte_arriba": _limpia(arriba[ia]),
+            "parte_abajo": _limpia(abajo[ib]),
+            "calzado": _limpia(calzado[ic]) if ic >= 0 else "",
+            "accesorios": _limpia(acc_ref),
         },
         "puntaje": int(round(sc)),
         "recomendacion": rec,
@@ -784,6 +809,26 @@ async def generar_outfit(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/analizar-prenda")
+async def analizar_prenda(request: Request):
+    """Recibe el ARCHIVO de la foto (Web.PostFile) y devuelve su color para guardarlo en la app."""
+    cuerpo = await request.body()
+    if len(cuerpo) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Imagen demasiado grande.")
+
+    def _analizar():
+        try:
+            return _perfil_desde_imagen(_preparar(Image.open(BytesIO(cuerpo))), "")
+        except Exception:
+            return None
+
+    p = await run_in_threadpool(_analizar)
+    if p is None:
+        raise HTTPException(status_code=422, detail="No pude leer la imagen.")
+    pista = f"{round(p.h) % 360}-{round(p.s * 100)}-{round(p.v * 100)}" + ("-e" if p.estampado else "")
+    return {"color": p.nombre, "familia": p.familia.lower(), "estampado": p.estampado, "pista": pista}
+
+
 def _tipo_ref(ref: str) -> str:
     if ref.startswith("data:image"):
         return "data_uri (legible)"
@@ -810,7 +855,7 @@ async def diagnostico(request: Request):
         lista = []
         for ref in datos[zona][:MAX_PRENDAS_CATEGORIA]:
             p = await run_in_threadpool(obtener_prenda, ref)
-            lista.append({"tipo": _tipo_ref(ref), "longitud": len(ref), "inicio": ref[:70],
+            lista.append({"tipo": _tipo_ref(_limpia(ref)), "longitud": len(ref), "inicio": ref[:70],
                           "color": p.nombre, "fuente": p.fuente})
         salida[zona] = lista
     return salida
