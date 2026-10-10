@@ -251,17 +251,22 @@ def _perfil_desde_imagen(img: Image.Image, ref: str) -> Optional[Prenda]:
     rgb, alpha = arr[..., :3] / 255.0, arr[..., 3]
 
     validos = alpha >= 128
-    # Fondo liso: si el borde es uniforme y la imagen no tiene transparencia, se descarta.
-    if (alpha < 128).mean() < 0.05:
+    fondo_quitado = (alpha < 128).mean() >= 0.05          # PNG con fondo transparente
+    if not fondo_quitado:
+        # Fondo liso: color más frecuente del borde. Tolera prendas que tocan el borde.
         borde = np.concatenate([rgb[0, :], rgb[-1, :], rgb[:, 0], rgb[:, -1]])
-        if borde.std(axis=0).mean() < 0.06:
-            bg = np.median(borde, axis=0)
-            validos &= np.linalg.norm(rgb - bg, axis=-1) > 0.12
+        q = np.round(borde * 8).astype(np.int32)
+        claves = q[:, 0] * 81 + q[:, 1] * 9 + q[:, 2]
+        moda = np.bincount(claves).argmax()
+        bg = borde[claves == moda].mean(axis=0)
+        if (np.linalg.norm(borde - bg, axis=-1) < 0.10).mean() >= 0.5:
+            validos &= np.linalg.norm(rgb - bg, axis=-1) > 0.10
+            fondo_quitado = True
 
     centro = np.zeros((H, W), dtype=bool)
     centro[int(H * .15):int(H * .85), int(W * .15):int(W * .85)] = True
-    sel = validos & centro
-    if sel.sum() < 0.10 * centro.sum():          # p. ej. camisa blanca sobre fondo blanco
+    sel = validos if fondo_quitado else (validos & centro)
+    if sel.sum() < max(20, 0.015 * H * W):       # p. ej. camisa blanca sobre fondo blanco
         sel = centro & (alpha >= 128)
     if sel.sum() < 20:
         return None
@@ -707,6 +712,17 @@ def _generar(d: dict) -> dict:
             sc, rz = _evaluar(pa, pb, None, base_pen)
             cands.append((sc, ia, ib, -1, rz))
 
+    if accesorios:      # el accesorio también cuenta: un anillo verde no debe ir con rojo
+        ajustados = []
+        for sc0, ia, ib, ic, rz in cands:
+            base = [perfiles[arriba[ia]], perfiles[abajo[ib]]]
+            if ic >= 0:
+                base.append(perfiles[calzado[ic]])
+            acc = max(_evaluar_accesorio(perfiles[r], base) for r in accesorios)
+            nuevo = 0.88 * sc0 + 0.12 * acc - (8.0 if acc < 45 else 0.0)
+            ajustados.append((nuevo, ia, ib, ic, rz))
+        cands = ajustados
+
     cands.sort(key=lambda c: c[0], reverse=True)
     mejor = cands[0][0]
     finalistas = [c for c in cands[:TOP_K] if c[0] >= mejor - UMBRAL_FINALISTAS] or cands[:1]
@@ -718,7 +734,7 @@ def _generar(d: dict) -> dict:
     pc = perfiles[calzado[ic]] if ic >= 0 else None
 
     # Accesorio: el que mejor encaja (con variedad), no uno al azar.
-    acc_ref, acc_perfil = "", None
+    acc_ref, acc_perfil, acc_choca = "", None, False
     if accesorios:
         base = [p for p in (pa, pb, pc) if p]
         pts = [max(0.0, _evaluar_accesorio(perfiles[r], base) - (6.0 if _limpia(r) in hist else 0.0))
@@ -726,6 +742,7 @@ def _generar(d: dict) -> dict:
         m = max(pts)
         acc_ref = random.choices(accesorios, weights=[math.exp((p - m) / 4.0) for p in pts], k=1)[0]
         acc_perfil = perfiles[acc_ref]
+        acc_choca = _evaluar_accesorio(acc_perfil, base) < 45
 
     # Alternativas (combinaciones distintas a la elegida)
     alternativas = []
@@ -746,10 +763,14 @@ def _generar(d: dict) -> dict:
     partes = f"{pa.nombre} arriba, {pb.nombre} abajo"
     if pc:
         partes += f" y calzado {pc.nombre}"
+    if acc_perfil:
+        partes += f", con accesorio {acc_perfil.nombre}"
     motivos = "; ".join(dict.fromkeys(razones[:3]))
     rec = f"Outfit {int(round(sc))}/100: {partes}."
     if motivos:
         rec += f" {motivos[0].upper() + motivos[1:]}."
+    if acc_choca:
+        rec += " Ojo: el accesorio no combina bien con esta ropa."
     if sc < 50:
         rec += (" Ojo: con las prendas disponibles todas las combinaciones tienen choques de color;"
                 ' agrega prendas neutras (negro, blanco, gris, jean, beige) para mejores resultados.')
