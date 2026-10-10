@@ -1,21 +1,8 @@
 # ==============================================================================
 # PROYECTO STILO - MOTOR INTELIGENTE DE COLORIMETRÍA Y VISIÓN POR COMPUTADORA
-# Desarrollado por: Alejandro Álvarez Rivera y Luis Esteban Ealo
-# Versión: 7.0.0 (Perfil de color dominante, teoría del color, caché y velocidad)
+# Desarrollado por: Alejandro Alvarez Rivera y Luis Esteban Ealo
+# Versión: 8.0.0 (Perfil de color dominante, teoría del color, caché y velocidad)
 # ==============================================================================
-#
-# Mejoras principales frente a la 6.1:
-#   * Cada imagen se analiza UNA sola vez (antes se decodificaba en cada combinación)
-#     y el resultado queda en caché LRU -> mucho más rápido.
-#   * Análisis en paralelo (hilos) y con imágenes reducidas (draft JPEG + thumbnail).
-#   * Color dominante real (no el promedio): ignora fondo y transparencias, detecta
-#     familias (negro, blanco, gris, beige, marrón, jean, azul marino, color) y estampados.
-#   * Puntuación con teoría del color: neutros, monocromático, análogos, complementarios,
-#     contraste de luminosidad, prenda protagonista, reglas clásicas (marrón+negro, etc.).
-#   * Selección ponderada (softmax) entre los mejores -> variedad sin perder calidad.
-#   * Historial opcional para no repetir prendas, alternativas y explicación en español.
-#   * Corrige: URIs base64 rotas por la coma, HTTPException 400 convertida en 500.
-#   * Fondo con rembg OPCIONAL (USE_REMBG=1); por defecto desactivado para ir rápido.
 #
 # Formato de entrada (compatible con App Inventor, igual que antes):
 #   INICIO_PARTE_ARRIBA ... FIN_PARTE_ARRIBA
@@ -26,7 +13,7 @@
 # También acepta JSON: {"parte_arriba":[...], "parte_abajo":[...], "calzado":[...],
 #                       "accesorios":[...], "historial":[...]}
 #
-# Arranque recomendado en producción:
+# Arranque recomendado:
 #   gunicorn main:app -k uvicorn.workers.UvicornWorker -w 2 --timeout 60
 # ==============================================================================
 
@@ -101,6 +88,7 @@ class Prenda:
     estampado: bool
     nombre: str
     fuente: str = "imagen"   # imagen | nombre | desconocido
+    acento: Optional[Tuple[float, float, float]] = None   # color secundario (piedras, detalles)
 
     @property
     def neutro(self) -> bool:
@@ -163,10 +151,27 @@ def _nombre_color(h: float, s: float, v: float, familia: str) -> str:
 
 
 def _construir_prenda(ref: str, h: float, s: float, v: float, estampado: bool,
-                      fuente: str = "imagen") -> Prenda:
+                      fuente: str = "imagen", acento=None) -> Prenda:
     fam = _clasificar(h, s, v)
     return Prenda(ref, float(h), float(s), float(v), fam, estampado,
-                  _nombre_color(h, s, v, fam), fuente)
+                  _nombre_color(h, s, v, fam), fuente, acento)
+
+
+def _es_dorado(p: Prenda) -> bool:
+    return p.familia == "COLOR" and 35 <= p.h <= 58 and p.s >= 0.30 and p.v >= 0.5
+
+
+def _nombre_accesorio(p: Prenda) -> str:
+    """Nombre pensado para accesorios: metales (plateado/dorado) y toques de color."""
+    if p.familia in ("GRIS", "BLANCO"):
+        base = "plateado"
+    elif _es_dorado(p):
+        base = "dorado"
+    else:
+        base = p.nombre
+    if p.acento:
+        base += " con toques de " + _nombre_color(p.acento[0], p.acento[1], p.acento[2], "COLOR")
+    return base
 
 
 # =========================== ANÁLISIS DE IMAGEN ================================
@@ -293,7 +298,18 @@ def _perfil_desde_imagen(img: Image.Image, ref: str) -> Optional[Prenda]:
     estampado = any(np.linalg.norm(medias[i] - medias[j]) > 0.5
                     for i in range(len(medias)) for j in range(i + 1, len(medias)))
 
-    return _construir_prenda(ref, float(dh[0]), float(ds[0]), float(dv[0]), bool(estampado))
+    # Acento: si lo dominante es neutro (p. ej. banda plateada), busca el color vivo secundario
+    acento = None
+    if _clasificar(float(dh[0]), float(ds[0]), float(dv[0])) in NEUTROS:
+        croma = (s >= 0.45) & (v >= 0.20)
+        if croma.sum() >= max(12, 0.03 * n):
+            top2 = int(np.bincount(hue_bin[croma], minlength=18).argmax())
+            m2 = px[croma & (hue_bin == top2)].mean(axis=0)
+            ah, as_, av = _rgb_a_hsv(m2.reshape(1, 3))
+            acento = (float(ah[0]), float(as_[0]), float(av[0]))
+
+    return _construir_prenda(ref, float(dh[0]), float(ds[0]), float(dv[0]), bool(estampado),
+                             "imagen", acento)
 
 
 # Fallback por nombre de archivo (más específico primero).
@@ -329,7 +345,7 @@ def _perfil_por_nombre(ref: str) -> Prenda:
 # Formato:  ruta@@pista     donde pista = "verde" | "azul marino" | "98-38-48" (h-s-v%)
 # El servidor no puede abrir /storage/... del celular, así que la app envía el color.
 SEP_PISTA = "@@"
-_RE_HSV = re.compile(r"^(\d{1,3})-(\d{1,3})-(\d{1,3})(-e)?$")
+_RE_HSV = re.compile(r"^(\d{1,3})-(\d{1,3})-(\d{1,3})(-e)?(?:~(\d{1,3})-(\d{1,3})-(\d{1,3}))?$")
 
 
 def _limpia(ref: str) -> str:
@@ -341,7 +357,10 @@ def _prenda_desde_pista(ref: str, pista: str) -> Optional[Prenda]:
     m = _RE_HSV.match(pista)
     if m:
         h, sat, val = int(m.group(1)) % 360, min(int(m.group(2)), 100) / 100, min(int(m.group(3)), 100) / 100
-        return _construir_prenda(ref, h, sat, val, bool(m.group(4)), "pista")
+        acento = None
+        if m.group(5):
+            acento = (int(m.group(5)) % 360, min(int(m.group(6)), 100) / 100, min(int(m.group(7)), 100) / 100)
+        return _construir_prenda(ref, h, sat, val, bool(m.group(4)), "pista", acento)
     p = _perfil_por_nombre(pista)
     return replace(p, ref=ref, fuente="pista") if p.fuente == "nombre" else None
 
@@ -441,6 +460,9 @@ def _armonia_par(a: Prenda, b: Prenda) -> Tuple[float, Optional[str]]:
             pts, razon = 70.0, "dos azules muy parecidos"
         elif n.familia == "MARRON" and c.h > 70 and c.s > 0.6:
             pts = 74.0
+        if c is b and b.vivo:                       # pantalón llamativo: apuesta más arriesgada
+            pts -= 14
+            razon = "la base neutra equilibra el color del pantalón"
         if c.estampado:
             pts -= 3
         return pts, razon
@@ -533,6 +555,8 @@ def _balance(piezas: List[Prenda]) -> Tuple[float, List[str]]:
         razones.append("exceso de colores distintos")
 
     a, b = piezas[0], piezas[1]
+    if b.vivo:
+        pts -= 10
     if a.estampado and b.estampado:
         pts -= 35
         razones.append("dos estampados chocan")
@@ -566,8 +590,17 @@ def _evaluar(a: Prenda, b: Prenda, c: Optional[Prenda], penal_hist: float) -> Tu
 
 def _evaluar_accesorio(acc: Prenda, base: List[Prenda]) -> float:
     cromaticas = [p for p in base if p.cromatico]
-    if acc.familia in ("NEGRO", "BLANCO", "GRIS", "MARRON", "BEIGE"):
-        return 80.0
+    if acc.familia in ("NEGRO", "BLANCO", "GRIS", "MARRON", "BEIGE") or _es_dorado(acc):
+        pts = 80.0                                   # metales y neutros: seguros
+        if acc.acento and cromaticas:                # ...salvo que sus piedras choquen
+            d = min(_dh(acc.acento[0], p.h) for p in cromaticas)
+            if d <= 40:
+                pts += 6
+            elif d >= 100 and acc.acento[1] >= 0.5 and any(p.vivo for p in cromaticas):
+                pts -= 40
+            elif d >= 60:
+                pts -= 12
+        return pts
     if acc.neutro:
         return 72.0
     if any(_dh(acc.h, p.h) <= 30 for p in cromaticas):
@@ -675,6 +708,64 @@ def _ficha(p: Optional[Prenda]):
             "fuente": p.fuente}
 
 
+# =========================== REDACCIÓN DEL TEXTO ===============================
+_NEG = ("choque", "chocan", "compite", "compiten", "demasiados", "exceso", "desentona", "arriesgada",
+        "no es lo ideal", "pelean", "sin contraste", "intenso de pies", "mismo color de pies", "opuestos")
+
+
+def _negativa(t: str) -> bool:
+    return any(k in t for k in _NEG)
+
+
+def _etiqueta(sc: float) -> str:
+    if sc >= 88:
+        return "Excelente combinación"
+    if sc >= 75:
+        return "Muy buena combinación"
+    if sc >= 60:
+        return "Buena combinación"
+    if sc >= 45:
+        return "Combinación aceptable"
+    return "Combinación arriesgada"
+
+
+def _consejo(pa: Prenda, pb: Prenda, pc: Optional[Prenda]) -> Optional[str]:
+    piezas = [p for p in (pa, pb, pc) if p]
+    vivas = [p for p in piezas if p.vivo]
+    if vivas and all(_dh(vivas[0].h, p.h) <= 30 for p in vivas):
+        return f"deja que el {vivas[0].nombre} sea el protagonista y mantén el resto sobrio."
+    if all(p.neutro for p in piezas):
+        return "si quieres darle vida, suma una prenda o un accesorio de color."
+    if pa.estampado or pb.estampado:
+        return "con el estampado, evita sumar más detalles llamativos."
+    return None
+
+
+def _redactar(sc, pa, pb, pc, acc, razones, acc_choca) -> str:
+    partes = [f"arriba en {pa.nombre}", f"abajo en {pb.nombre}"]
+    if pc:
+        partes.append(f"calzado en {pc.nombre}")
+    if acc:
+        partes.append(f"accesorio {_nombre_accesorio(acc)}")
+    rec = f"{_etiqueta(sc)} ({int(round(sc))}/100): {', '.join(partes[:-1])} y {partes[-1]}."
+    unicas = list(dict.fromkeys(r for r in razones if r))
+    buenas = [r for r in unicas if not _negativa(r)][:2]
+    malas = [r for r in unicas if _negativa(r)][:1]
+    if acc_choca:
+        malas.append("el accesorio no combina bien con esta ropa")
+    if buenas:
+        rec += " Lo mejor: " + " y ".join(buenas) + "."
+    if malas:
+        rec += " Ojo: " + "; ".join(malas) + "."
+    else:
+        c = _consejo(pa, pb, pc)
+        if c:
+            rec += " Tip: " + c
+    if sc < 50:
+        rec += " Es lo mejor con tu armario actual; suma prendas neutras (negro, blanco, gris, jean, beige)."
+    return rec
+
+
 # ============================= LÓGICA PRINCIPAL ================================
 def _generar(d: dict) -> dict:
     t0 = time.perf_counter()
@@ -759,21 +850,11 @@ def _generar(d: dict) -> dict:
         if len(alternativas) == 3:
             break
 
-    # Texto explicativo
-    partes = f"{pa.nombre} arriba, {pb.nombre} abajo"
-    if pc:
-        partes += f" y calzado {pc.nombre}"
-    if acc_perfil:
-        partes += f", con accesorio {acc_perfil.nombre}"
-    motivos = "; ".join(dict.fromkeys(razones[:3]))
-    rec = f"Outfit {int(round(sc))}/100: {partes}."
-    if motivos:
-        rec += f" {motivos[0].upper() + motivos[1:]}."
-    if acc_choca:
-        rec += " Ojo: el accesorio no combina bien con esta ropa."
-    if sc < 50:
-        rec += (" Ojo: con las prendas disponibles todas las combinaciones tienen choques de color;"
-                ' agrega prendas neutras (negro, blanco, gris, jean, beige) para mejores resultados.')
+    rec = _redactar(sc, pa, pb, pc, acc_perfil, razones, acc_choca)
+
+    detalle_acc = _ficha(acc_perfil)
+    if detalle_acc:
+        detalle_acc["color"] = _nombre_accesorio(acc_perfil)
 
     advertencias = [f"No se pudo leer el color de una prenda de {zona} (fuente: {p.fuente}); "
                     "envía la imagen en base64 o una URL."
@@ -791,7 +872,7 @@ def _generar(d: dict) -> dict:
         "recomendacion": rec,
         "detalle": {
             "parte_arriba": _ficha(pa), "parte_abajo": _ficha(pb),
-            "calzado": _ficha(pc), "accesorios": _ficha(acc_perfil),
+            "calzado": _ficha(pc), "accesorios": detalle_acc,
         },
         "advertencias": advertencias,
         "alternativas": alternativas,
@@ -847,6 +928,8 @@ async def analizar_prenda(request: Request):
     if p is None:
         raise HTTPException(status_code=422, detail="No pude leer la imagen.")
     pista = f"{round(p.h) % 360}-{round(p.s * 100)}-{round(p.v * 100)}" + ("-e" if p.estampado else "")
+    if p.acento:
+        pista += f"~{round(p.acento[0]) % 360}-{round(p.acento[1] * 100)}-{round(p.acento[2] * 100)}"
     return {"color": p.nombre, "familia": p.familia.lower(), "estampado": p.estampado, "pista": pista}
 
 
