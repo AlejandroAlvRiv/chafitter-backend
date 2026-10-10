@@ -550,16 +550,42 @@ def _evaluar_accesorio(acc: Prenda, base: List[Prenda]) -> float:
 _RE_DATA_URI = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=_-]+")
 
 
+_RE_DATA_INICIO = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,")
+_RE_B64_TOKEN = re.compile(r"[A-Za-z0-9+/=_-]+")
+
+
 def extraer_rutas_de_bloque(texto_bloque: str) -> list:
-    """Parsea un bloque delimitado. Conserva intactas las URIs base64 (llevan coma)."""
+    """Parsea un bloque delimitado. Conserva las URIs base64 (llevan coma y pueden
+    venir partidas en varias líneas de 64/76 caracteres)."""
     if not texto_bloque:
         return []
     texto = str(texto_bloque)
-    items = _RE_DATA_URI.findall(texto)
-    resto = _RE_DATA_URI.sub(" ", texto)
     for ch in "()[]{}\"'":
-        resto = resto.replace(ch, " ")
-    items += [t for t in re.split(r"[\s,;|]+", resto) if t]
+        texto = texto.replace(ch, " ")
+    items, resto = [], []
+    prefijos = _RE_DATA_INICIO.findall(texto)
+    partes = _RE_DATA_INICIO.split(texto)
+    resto.append(partes[0])
+    for pref, parte in zip(prefijos, partes[1:]):
+        trozos = parte.split()
+        b64, i, previo = [], 0, 9999
+        while i < len(trozos) and previo >= 60:      # línea completa -> puede continuar
+            m = _RE_B64_TOKEN.match(trozos[i])
+            if not m:
+                break
+            b64.append(m.group())
+            previo = len(m.group())
+            if m.end() < len(trozos[i]):             # terminó por coma, barra vertical, etc.
+                resto.append(trozos[i][m.end():])
+                i += 1
+                break
+            i += 1
+        resto.extend(trozos[i:])
+        if b64:
+            items.append(pref + "".join(b64))
+    for t in re.split(r"[\s,;|]+", " ".join(resto)):
+        if t:
+            items.append(t)
     return list(dict.fromkeys(items))
 
 
@@ -756,6 +782,38 @@ async def generar_outfit(request: Request):
     except Exception as e:
         log.exception("Error generando outfit")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _tipo_ref(ref: str) -> str:
+    if ref.startswith("data:image"):
+        return "data_uri (legible)"
+    if ref.lower().startswith(("http://", "https://")):
+        return "url"
+    if len(ref) < 1024 and os.path.isfile(ref):
+        return "archivo_en_servidor (legible)"
+    if _RE_B64_PURO.match(ref):
+        return "base64_sin_prefijo (legible)"
+    if ref.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", ref):
+        return "ruta_local_del_celular (NO legible por el servidor)"
+    return "texto"
+
+
+@app.post("/api/diagnostico")
+async def diagnostico(request: Request):
+    """Muestra qué recibió el servidor y qué color detectó en cada prenda."""
+    body = (await request.body()).decode("utf-8", errors="ignore")
+    datos = _parsear_cuerpo(body)
+    salida = {"bytes_recibidos": len(body),
+              "bloques_encontrados": {n: (f"INICIO_{n}" in body) for n in
+                                      ("PARTE_ARRIBA", "PARTE_ABAJO", "CALZADO", "ACCESORIOS")}}
+    for zona in ("arriba", "abajo", "calzado", "accesorios"):
+        lista = []
+        for ref in datos[zona][:MAX_PRENDAS_CATEGORIA]:
+            p = await run_in_threadpool(obtener_prenda, ref)
+            lista.append({"tipo": _tipo_ref(ref), "longitud": len(ref), "inicio": ref[:70],
+                          "color": p.nombre, "fuente": p.fuente})
+        salida[zona] = lista
+    return salida
 
 
 if __name__ == "__main__":
